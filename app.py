@@ -125,6 +125,9 @@ if "closed_positions" not in st.session_state:
 if "trade_journal" not in st.session_state:
     st.session_state.trade_journal = []
 
+if "run_complete_scan_requested" not in st.session_state:
+    st.session_state.run_complete_scan_requested = False
+
 
 # =====================================================
 # HEADER
@@ -753,14 +756,12 @@ def calculate_indicators(df):
 
     except Exception as e:
 
-        import traceback
+        st.error("===================================")
+        st.error("Indicator failed")
+        st.error(str(e))
+        st.code(traceback.format_exc())
 
-    st.error("===================================")
-    st.error(f"Indicator failed")
-    st.error(str(e))
-    st.code(traceback.format_exc())
-
-    return None
+        return None
 # =====================================================
 # STOCK INTELLIGENCE OBJECT
 # VERSION 2.2B
@@ -1534,6 +1535,13 @@ class TradeCandidate:
         self.confidence = 0
 
         self.position_size = 0
+        self.capital_required = 0
+        self.maximum_loss = 0
+        self.maximum_profit = 0
+        self.portfolio_weight = 0
+        self.ai_score = 0
+        self.strategy_count = 0
+        self.direction = "LONG"
 
         self.reasons = []
 
@@ -2560,17 +2568,8 @@ if st.button("Run Complete Scan"):
 
     else:
 
-        execute_scan_pipeline()
-
-        if len(st.session_state.final_trade_list):
-
-            show_ai_consensus()
-
-            show_allocated_portfolio()
-
-        else:
-
-            st.info("No Trade Candidates Found")
+        st.session_state.run_complete_scan_requested = True
+        st.info("Scan queued. Initializing all strategy modules before execution.")
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -2814,7 +2813,22 @@ def open_paper_trade(trade):
     if trade.symbol in st.session_state.paper_positions:
         return
 
-    position = PaperPosition(trade)
+    position = PaperPosition(
+        symbol=trade.symbol,
+        strategy=trade.strategy,
+        qty=trade.position_size,
+        entry=trade.entry or 0,
+        stop=trade.stop or 0,
+        target1=trade.target1 or 0,
+        target2=trade.target2 or 0,
+        target3=trade.target3 or 0,
+        confidence=trade.confidence,
+        ai_score=getattr(trade, "ai_score", 0)
+    )
+
+    if hasattr(position, "initialise"):
+
+        position.initialise()
 
     st.session_state.paper_positions[trade.symbol] = position
 
@@ -2837,23 +2851,35 @@ def update_paper_trade(symbol, last_price):
 
     if last_price <= position.stop:
 
-        position.mark_closed(
+        if hasattr(position, "mark_closed"):
 
-            position.stop,
+            position.mark_closed(
 
-            "STOP LOSS"
+                position.stop,
 
-        )
+                "STOP LOSS"
+
+            )
+
+        else:
+
+            position.close_trade("STOP LOSS", position.stop)
 
     elif last_price >= position.target1:
 
-        position.mark_closed(
+        if hasattr(position, "mark_closed"):
 
-            position.target1,
+            position.mark_closed(
 
-            "TARGET"
+                position.target1,
 
-        )
+                "TARGET"
+
+            )
+
+        else:
+
+            position.close_trade("TARGET", position.target1)
 
     if position.status == "CLOSED":
 
@@ -4117,6 +4143,9 @@ def create_vcp_candidate(stock):
 
     trade.set_stop(round(stop, 2))
 
+    if trade.entry is None or trade.stop is None:
+        return
+
     risk = trade.entry - trade.stop
 
     trade.set_target1(
@@ -4533,6 +4562,9 @@ def create_order_block_candidate(stock):
 
     trade.set_entry(round(zone["High"], 2))
     trade.set_stop(round(zone["Low"], 2))
+
+    if trade.entry is None or trade.stop is None:
+        return
 
     risk = trade.entry - trade.stop
 
@@ -5398,6 +5430,9 @@ def create_fvg_candidate(stock):
         )
 
     )
+
+    if trade.entry is None or trade.stop is None:
+        return
 
     risk = trade.entry - trade.stop
 
@@ -6312,6 +6347,10 @@ def calculate_sector_strength():
 
             df = calculate_indicators(df)
 
+            if df is None:
+
+                continue
+
             last = df.iloc[-1]
 
             score = 0
@@ -6549,7 +6588,7 @@ def show_live_positions():
 
             "Entry":p.entry,
 
-            "Qty":p.quantity,
+            "Qty":getattr(p, "quantity", getattr(p, "qty", 0)),
 
             "Status":p.status
 
@@ -6574,6 +6613,23 @@ def show_live_positions():
             "No Open Positions"
 
         )
+
+
+if st.session_state.run_complete_scan_requested:
+
+    st.session_state.run_complete_scan_requested = False
+
+    execute_scan_pipeline()
+
+    if len(st.session_state.final_trade_list):
+
+        show_ai_consensus()
+
+        show_allocated_portfolio()
+
+    else:
+
+        st.info("No Trade Candidates Found")
 show_market_dashboard()
 
 show_ai_summary()
