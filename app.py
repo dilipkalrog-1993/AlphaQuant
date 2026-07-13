@@ -18,6 +18,7 @@ import time
 import logging
 import traceback
 import warnings
+from dataclasses import dataclass, field
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -124,6 +125,9 @@ if "closed_positions" not in st.session_state:
 
 if "trade_journal" not in st.session_state:
     st.session_state.trade_journal = []
+
+if "scan_requested" not in st.session_state:
+    st.session_state.scan_requested = False
 
 
 # =====================================================
@@ -571,7 +575,7 @@ st.sidebar.success("Configuration Loaded")
 
 try:
     import pandas_ta as ta
-except:
+except Exception:
     st.error(
         "Please install pandas-ta\n\npip install pandas-ta"
     )
@@ -753,14 +757,12 @@ def calculate_indicators(df):
 
     except Exception as e:
 
-        import traceback
+        st.error("===================================")
+        st.error("Indicator failed")
+        st.error(str(e))
+        st.code(traceback.format_exc())
 
-    st.error("===================================")
-    st.error(f"Indicator failed")
-    st.error(str(e))
-    st.code(traceback.format_exc())
-
-    return None
+        return None
 # =====================================================
 # STOCK INTELLIGENCE OBJECT
 # VERSION 2.2B
@@ -2560,17 +2562,7 @@ if st.button("Run Complete Scan"):
 
     else:
 
-        execute_scan_pipeline()
-
-        if len(st.session_state.final_trade_list):
-
-            show_ai_consensus()
-
-            show_allocated_portfolio()
-
-        else:
-
-            st.info("No Trade Candidates Found")
+        st.session_state.scan_requested = True
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -2754,7 +2746,7 @@ if "paper_history" not in st.session_state:
     st.session_state.paper_history = []
 
 
-class PaperPosition:
+class PaperTradePosition:
 
     def __init__(self, trade):
 
@@ -2814,7 +2806,7 @@ def open_paper_trade(trade):
     if trade.symbol in st.session_state.paper_positions:
         return
 
-    position = PaperPosition(trade)
+    position = PaperTradePosition(trade)
 
     st.session_state.paper_positions[trade.symbol] = position
 
@@ -3897,8 +3889,6 @@ def show_allocated_portfolio():
 # VERSION 3.5A
 # =====================================================
 
-import time
-
 if "live_monitor_running" not in st.session_state:
     st.session_state.live_monitor_running = False
 
@@ -3922,7 +3912,7 @@ def update_live_trade(stock):
     )
 
 
-def monitor_open_positions():
+def monitor_paper_positions():
 
     for symbol in list(st.session_state.paper_positions.keys()):
 
@@ -3940,7 +3930,7 @@ def start_live_monitor():
 
     while st.session_state.live_monitor_running:
 
-        monitor_open_positions()
+        monitor_paper_positions()
 
         time.sleep(5)
 
@@ -4038,7 +4028,7 @@ def execute_scan_pipeline():
 
     execute_selected_portfolio()
 
-    monitor_open_positions()
+    monitor_paper_positions()
 
     status.success(
 
@@ -4579,12 +4569,8 @@ register_strategy(
 # PROFESSIONAL POSITION OBJECT
 # ==========================================================
 
-from dataclasses import dataclass, field
-from datetime import datetime
-
-
 @dataclass
-class PaperPosition:
+class ManagedPosition:
 
     symbol: str
     strategy: str
@@ -4827,7 +4813,7 @@ def remove_open_position(symbol):
 
         del st.session_state.open_positions[symbol]
 
-       # ==========================================================
+# ==========================================================
 # MODULE A - PART 3
 # TRADE MANAGEMENT ENGINE
 # ==========================================================
@@ -5008,7 +4994,7 @@ def archive_closed_position(position):
     })
 
 
-def monitor_open_positions():
+def monitor_managed_positions():
 
     if len(st.session_state.open_positions) == 0:
 
@@ -5131,6 +5117,8 @@ def portfolio_statistics():
 
 
 def show_portfolio_dashboard():
+
+    monitor_managed_positions()
 
     stats = portfolio_statistics()
 
@@ -5460,11 +5448,6 @@ register_strategy(
     run_fvg_strategy,
     priority=60
 )
-register_strategy(
-    "FVG",
-    run_fvg_strategy,
-    priority=70
-)
 # =====================================================
 # LIQUIDITY SWEEP ENGINE
 # MODULE B - PART 2
@@ -5700,6 +5683,12 @@ def run_liquidity_strategy(stock):
     detect_liquidity_sweep(stock)
 
     create_liquidity_candidate(stock)
+
+register_strategy(
+    "LIQUIDITY SWEEP",
+    run_liquidity_strategy,
+    priority=65
+)
 # =====================================================
 # ==========================================================
 # MARKET REGIME ENGINE
@@ -6334,7 +6323,7 @@ def calculate_sector_strength():
 
             sector_strength[sector] = score
 
-        except:
+        except Exception:
 
             continue
 
@@ -6581,3 +6570,21 @@ show_ai_summary()
 show_portfolio_summary()
 
 show_live_positions()
+
+show_portfolio_dashboard()
+
+if st.session_state.scan_requested:
+
+    st.session_state.scan_requested = False
+
+    execute_scan_pipeline()
+
+    if len(st.session_state.final_trade_list):
+
+        show_ai_consensus()
+
+        show_allocated_portfolio()
+
+    else:
+
+        st.info("No Trade Candidates Found")
