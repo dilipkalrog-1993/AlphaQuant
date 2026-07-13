@@ -18,7 +18,6 @@ import time
 import logging
 import traceback
 import warnings
-from dataclasses import dataclass, field
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -126,8 +125,8 @@ if "closed_positions" not in st.session_state:
 if "trade_journal" not in st.session_state:
     st.session_state.trade_journal = []
 
-if "scan_requested" not in st.session_state:
-    st.session_state.scan_requested = False
+if "run_complete_scan_requested" not in st.session_state:
+    st.session_state.run_complete_scan_requested = False
 
 
 # =====================================================
@@ -575,7 +574,7 @@ st.sidebar.success("Configuration Loaded")
 
 try:
     import pandas_ta as ta
-except Exception:
+except:
     st.error(
         "Please install pandas-ta\n\npip install pandas-ta"
     )
@@ -1536,6 +1535,13 @@ class TradeCandidate:
         self.confidence = 0
 
         self.position_size = 0
+        self.capital_required = 0
+        self.maximum_loss = 0
+        self.maximum_profit = 0
+        self.portfolio_weight = 0
+        self.ai_score = 0
+        self.strategy_count = 0
+        self.direction = "LONG"
 
         self.reasons = []
 
@@ -2562,7 +2568,8 @@ if st.button("Run Complete Scan"):
 
     else:
 
-        st.session_state.scan_requested = True
+        st.session_state.run_complete_scan_requested = True
+        st.info("Scan queued. Initializing all strategy modules before execution.")
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -2746,7 +2753,7 @@ if "paper_history" not in st.session_state:
     st.session_state.paper_history = []
 
 
-class PaperTradePosition:
+class PaperPosition:
 
     def __init__(self, trade):
 
@@ -2806,7 +2813,22 @@ def open_paper_trade(trade):
     if trade.symbol in st.session_state.paper_positions:
         return
 
-    position = PaperTradePosition(trade)
+    position = PaperPosition(
+        symbol=trade.symbol,
+        strategy=trade.strategy,
+        qty=trade.position_size,
+        entry=trade.entry or 0,
+        stop=trade.stop or 0,
+        target1=trade.target1 or 0,
+        target2=trade.target2 or 0,
+        target3=trade.target3 or 0,
+        confidence=trade.confidence,
+        ai_score=getattr(trade, "ai_score", 0)
+    )
+
+    if hasattr(position, "initialise"):
+
+        position.initialise()
 
     st.session_state.paper_positions[trade.symbol] = position
 
@@ -2829,23 +2851,35 @@ def update_paper_trade(symbol, last_price):
 
     if last_price <= position.stop:
 
-        position.mark_closed(
+        if hasattr(position, "mark_closed"):
 
-            position.stop,
+            position.mark_closed(
 
-            "STOP LOSS"
+                position.stop,
 
-        )
+                "STOP LOSS"
+
+            )
+
+        else:
+
+            position.close_trade("STOP LOSS", position.stop)
 
     elif last_price >= position.target1:
 
-        position.mark_closed(
+        if hasattr(position, "mark_closed"):
 
-            position.target1,
+            position.mark_closed(
 
-            "TARGET"
+                position.target1,
 
-        )
+                "TARGET"
+
+            )
+
+        else:
+
+            position.close_trade("TARGET", position.target1)
 
     if position.status == "CLOSED":
 
@@ -3889,6 +3923,8 @@ def show_allocated_portfolio():
 # VERSION 3.5A
 # =====================================================
 
+import time
+
 if "live_monitor_running" not in st.session_state:
     st.session_state.live_monitor_running = False
 
@@ -3912,7 +3948,7 @@ def update_live_trade(stock):
     )
 
 
-def monitor_paper_positions():
+def monitor_open_positions():
 
     for symbol in list(st.session_state.paper_positions.keys()):
 
@@ -3930,7 +3966,7 @@ def start_live_monitor():
 
     while st.session_state.live_monitor_running:
 
-        monitor_paper_positions()
+        monitor_open_positions()
 
         time.sleep(5)
 
@@ -4028,7 +4064,7 @@ def execute_scan_pipeline():
 
     execute_selected_portfolio()
 
-    monitor_paper_positions()
+    monitor_open_positions()
 
     status.success(
 
@@ -4106,6 +4142,9 @@ def create_vcp_candidate(stock):
     )
 
     trade.set_stop(round(stop, 2))
+
+    if trade.entry is None or trade.stop is None:
+        return
 
     risk = trade.entry - trade.stop
 
@@ -4524,6 +4563,9 @@ def create_order_block_candidate(stock):
     trade.set_entry(round(zone["High"], 2))
     trade.set_stop(round(zone["Low"], 2))
 
+    if trade.entry is None or trade.stop is None:
+        return
+
     risk = trade.entry - trade.stop
 
     if risk <= 0:
@@ -4569,8 +4611,12 @@ register_strategy(
 # PROFESSIONAL POSITION OBJECT
 # ==========================================================
 
+from dataclasses import dataclass, field
+from datetime import datetime
+
+
 @dataclass
-class ManagedPosition:
+class PaperPosition:
 
     symbol: str
     strategy: str
@@ -4813,7 +4859,7 @@ def remove_open_position(symbol):
 
         del st.session_state.open_positions[symbol]
 
-# ==========================================================
+       # ==========================================================
 # MODULE A - PART 3
 # TRADE MANAGEMENT ENGINE
 # ==========================================================
@@ -4994,7 +5040,7 @@ def archive_closed_position(position):
     })
 
 
-def monitor_managed_positions():
+def monitor_open_positions():
 
     if len(st.session_state.open_positions) == 0:
 
@@ -5117,8 +5163,6 @@ def portfolio_statistics():
 
 
 def show_portfolio_dashboard():
-
-    monitor_managed_positions()
 
     stats = portfolio_statistics()
 
@@ -5387,6 +5431,9 @@ def create_fvg_candidate(stock):
 
     )
 
+    if trade.entry is None or trade.stop is None:
+        return
+
     risk = trade.entry - trade.stop
 
     if risk <= 0:
@@ -5447,6 +5494,11 @@ register_strategy(
     "FVG",
     run_fvg_strategy,
     priority=60
+)
+register_strategy(
+    "FVG",
+    run_fvg_strategy,
+    priority=70
 )
 # =====================================================
 # LIQUIDITY SWEEP ENGINE
@@ -5683,12 +5735,6 @@ def run_liquidity_strategy(stock):
     detect_liquidity_sweep(stock)
 
     create_liquidity_candidate(stock)
-
-register_strategy(
-    "LIQUIDITY SWEEP",
-    run_liquidity_strategy,
-    priority=65
-)
 # =====================================================
 # ==========================================================
 # MARKET REGIME ENGINE
@@ -6301,6 +6347,10 @@ def calculate_sector_strength():
 
             df = calculate_indicators(df)
 
+            if df is None:
+
+                continue
+
             last = df.iloc[-1]
 
             score = 0
@@ -6323,7 +6373,7 @@ def calculate_sector_strength():
 
             sector_strength[sector] = score
 
-        except Exception:
+        except:
 
             continue
 
@@ -6538,7 +6588,7 @@ def show_live_positions():
 
             "Entry":p.entry,
 
-            "Qty":p.quantity,
+            "Qty":getattr(p, "quantity", getattr(p, "qty", 0)),
 
             "Status":p.status
 
@@ -6563,19 +6613,11 @@ def show_live_positions():
             "No Open Positions"
 
         )
-show_market_dashboard()
 
-show_ai_summary()
 
-show_portfolio_summary()
+if st.session_state.run_complete_scan_requested:
 
-show_live_positions()
-
-show_portfolio_dashboard()
-
-if st.session_state.scan_requested:
-
-    st.session_state.scan_requested = False
+    st.session_state.run_complete_scan_requested = False
 
     execute_scan_pipeline()
 
@@ -6588,3 +6630,10 @@ if st.session_state.scan_requested:
     else:
 
         st.info("No Trade Candidates Found")
+show_market_dashboard()
+
+show_ai_summary()
+
+show_portfolio_summary()
+
+show_live_positions()
