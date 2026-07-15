@@ -6588,7 +6588,7 @@ def show_live_positions():
 
             "Entry":p.entry,
 
-            "Qty":getattr(p, "quantity", getattr(p, "qty", 0)),
+            "Qty":p.quantity,
 
             "Status":p.status
 
@@ -6613,11 +6613,19 @@ def show_live_positions():
             "No Open Positions"
 
         )
+show_market_dashboard()
 
+show_ai_summary()
 
-if st.session_state.run_complete_scan_requested:
+show_portfolio_summary()
 
-    st.session_state.run_complete_scan_requested = False
+show_live_positions()
+
+show_portfolio_dashboard()
+
+if st.session_state.scan_requested:
+
+    st.session_state.scan_requested = False
 
     execute_scan_pipeline()
 
@@ -6630,10 +6638,3 @@ if st.session_state.run_complete_scan_requested:
     else:
 
         st.info("No Trade Candidates Found")
-show_market_dashboard()
-
-show_ai_summary()
-
-show_portfolio_summary()
-
-show_live_positions()
