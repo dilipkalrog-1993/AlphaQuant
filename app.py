@@ -129,15 +129,79 @@ if "run_complete_scan_requested" not in st.session_state:
     st.session_state.run_complete_scan_requested = False
 
 
+
+# =====================================================
+# ALPHAQUANT DESIGN SYSTEM + PLATFORM SHELL
+# =====================================================
+
+DESIGN_TOKENS = {
+    "ink": "#E6EDF7",
+    "muted": "#8EA4C2",
+    "panel": "#111A2E",
+    "panel_alt": "#17233A",
+    "accent": "#55D6BE",
+    "warning": "#F6C85F",
+    "danger": "#FF6B6B",
+    "success": "#66E08A",
+}
+
+st.markdown("""
+<style>
+.stApp { background: radial-gradient(circle at top left, #10213B 0, #07111F 36%, #050A13 100%); color: #E6EDF7; }
+[data-testid="stSidebar"] { background: #07111F; border-right: 1px solid rgba(142, 164, 194, .22); }
+div[data-testid="stMetric"] { background: linear-gradient(135deg, rgba(17,26,46,.96), rgba(23,35,58,.92)); border: 1px solid rgba(142,164,194,.22); border-radius: 18px; padding: 18px; box-shadow: 0 18px 60px rgba(0,0,0,.22); }
+.aq-hero { border: 1px solid rgba(142,164,194,.22); background: linear-gradient(135deg, rgba(17,26,46,.96), rgba(85,214,190,.10)); border-radius: 26px; padding: 28px 30px; margin: 8px 0 22px; }
+.aq-kicker { color: #55D6BE; font-size: .78rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+.aq-title { color: #E6EDF7; font-size: 2.4rem; line-height: 1.05; margin: 8px 0; font-weight: 850; }
+.aq-copy { color: #8EA4C2; font-size: 1rem; max-width: 980px; }
+.stButton > button { border-radius: 999px; border: 1px solid rgba(85,214,190,.42); font-weight: 800; }
+h1, h2, h3 { letter-spacing: -.02em; }
+</style>
+""", unsafe_allow_html=True)
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "active_page" not in st.session_state:
+    st.session_state.active_page = "Mission Control"
+if "scan_requested" not in st.session_state:
+    st.session_state.scan_requested = False
+
+if not st.session_state.authenticated:
+    st.markdown("""
+    <div class="aq-hero">
+      <div class="aq-kicker">AlphaQuant OS</div>
+      <div class="aq-title">Professional trading intelligence, ready for secure authentication.</div>
+      <div class="aq-copy">Future-ready gateway for identity providers, role-based access, broker permissions, and audit controls.</div>
+    </div>
+    """, unsafe_allow_html=True)
+    login_left, login_right = st.columns([1, 1])
+    with login_left:
+        st.text_input("Workspace", value="AlphaQuant Institutional", disabled=True)
+        st.text_input("Email", placeholder="trader@example.com")
+        st.text_input("Password", type="password", placeholder="Authentication coming soon")
+        if st.button("Enter AlphaQuant OS", type="primary", use_container_width=True):
+            st.session_state.authenticated = True
+            st.rerun()
+    with login_right:
+        st.info("Authentication shell only. Trading Brains and database schema remain unchanged.")
+    st.stop()
+
+NAVIGATION = ["Dashboard", "Mission Control", "Portfolio", "Performance", "Reports", "Learning", "Broker Manager", "Settings", "Developer Mode"]
+st.sidebar.markdown("### AlphaQuant OS")
+st.session_state.active_page = st.sidebar.radio("Navigation", NAVIGATION, index=NAVIGATION.index(st.session_state.active_page))
+st.markdown(f"""
+<div class="aq-hero">
+  <div class="aq-kicker">{st.session_state.active_page}</div>
+  <div class="aq-title">AlphaQuant OS</div>
+  <div class="aq-copy">Unified design system, one-button execution, and institutional portfolio visibility.</div>
+</div>
+""", unsafe_allow_html=True)
+
 # =====================================================
 # HEADER
 # =====================================================
 
-st.title("📈 AlphaQuant Professional")
-
-st.caption(
-    "AI Assisted Long Only Trading Platform"
-)
+# Header rendered by AlphaQuant OS platform shell above.
 
 # =====================================================
 # DASHBOARD
@@ -497,7 +561,7 @@ st.divider()
 
 st.subheader("Market Data Engine")
 
-if st.button("Download Complete Universe"):
+if st.button("Developer: Download Complete Universe"):
 
     st.session_state.market_data = download_market_data(
 
@@ -1206,7 +1270,7 @@ st.divider()
 
 st.subheader("Trade Quality Engine")
 
-if st.button("Test Trade Quality"):
+if st.button("Developer: Test Trade Quality"):
 
     if len(st.session_state.market_data) == 0:
 
@@ -1451,7 +1515,7 @@ st.divider()
 
 st.subheader("Market Structure Engine")
 
-if st.button("Test Market Structure"):
+if st.button("Developer: Test Market Structure"):
 
     if len(st.session_state.market_data) == 0:
 
@@ -1680,7 +1744,7 @@ st.divider()
 
 st.subheader("Trade Candidate Engine")
 
-if st.button("Show Trade Candidates"):
+if st.button("Developer: Show Trade Candidates"):
 
     df=get_trade_candidates()
 
@@ -2560,7 +2624,7 @@ st.divider()
 
 st.subheader("AlphaQuant Scanner")
 
-if st.button("Run Complete Scan"):
+if st.button("RUN ALPHAQUANT", type="primary", use_container_width=True):
 
     if len(st.session_state.market_data) == 0:
 
@@ -6613,19 +6677,49 @@ def show_live_positions():
             "No Open Positions"
 
         )
-show_market_dashboard()
 
-show_ai_summary()
+# =====================================================
+# PRODUCTIZED PAGE COMPOSITION
+# =====================================================
+if st.session_state.active_page in ["Dashboard", "Mission Control"]:
+    show_market_dashboard()
+    show_ai_summary()
+    show_portfolio_summary()
+    show_live_positions()
+elif st.session_state.active_page == "Portfolio":
+    show_portfolio_dashboard()
+elif st.session_state.active_page == "Performance":
+    st.subheader("Performance")
+    stats = portfolio_statistics()
+    st.metric("Total Realized P&L", f"₹{stats['ClosedPnL']:.2f}")
+elif st.session_state.active_page == "Reports":
+    st.subheader("Reports")
+    report_tabs = st.tabs(["Daily", "Weekly", "Monthly", "Yearly"])
+    for label, tab in zip(["Daily", "Weekly", "Monthly", "Yearly"], report_tabs):
+        with tab:
+            st.metric(f"{label} Net P&L", f"₹{portfolio_statistics()['ClosedPnL']:.2f}")
+            st.dataframe(pd.DataFrame(st.session_state.trade_journal), use_container_width=True)
+elif st.session_state.active_page == "Learning":
+    st.subheader("Learning Dashboard")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Reviewer", "Ready")
+    c2.metric("Experience Memory", len(st.session_state.trade_journal))
+    c3.metric("Avg Confidence", round(np.mean([t.confidence for t in st.session_state.final_trade_list]) if st.session_state.final_trade_list else 0, 2))
+    c4.metric("Historical Analogs", sum(len(getattr(s, 'patterns', {})) for s in st.session_state.stock_objects.values()))
+elif st.session_state.active_page == "Broker Manager":
+    st.subheader("Broker Manager")
+    st.info("Broker connectivity control center prepared for future broker authentication and permissions.")
+elif st.session_state.active_page == "Settings":
+    st.subheader("Settings")
+    st.info("Runtime settings are available in the sidebar. Design tokens are centralized in DESIGN_TOKENS.")
+elif st.session_state.active_page == "Developer Mode":
+    with st.expander("Legacy developer controls", expanded=True):
+        st.warning("Legacy diagnostic sections remain available and are labeled as Developer actions.")
 
-show_portfolio_summary()
-
-show_live_positions()
-
-show_portfolio_dashboard()
-
-if st.session_state.scan_requested:
+if st.session_state.scan_requested or st.session_state.run_complete_scan_requested:
 
     st.session_state.scan_requested = False
+    st.session_state.run_complete_scan_requested = False
 
     execute_scan_pipeline()
 
