@@ -132,7 +132,7 @@ STOCK_SECTOR_MAP = {
 # LOGGING
 # =====================================================
 
-LOG_FOLDER = "logs"
+LOG_FOLDER = os.path.join(_APP_DIR, "logs")
 
 os.makedirs(LOG_FOLDER, exist_ok=True)
 
@@ -194,6 +194,21 @@ if "last_cycle_message" not in st.session_state:
 if "autonomous_active" not in st.session_state:
     st.session_state.autonomous_active = False
 
+if "pipeline_events" not in st.session_state:
+    st.session_state.pipeline_events = []
+
+if "brain_status" not in st.session_state:
+    st.session_state.brain_status = {}
+
+if "decision_funnel" not in st.session_state:
+    st.session_state.decision_funnel = []
+
+if "no_trade_explanation" not in st.session_state:
+    st.session_state.no_trade_explanation = []
+
+if "startup_health" not in st.session_state:
+    st.session_state.startup_health = []
+
 
 # =====================================================
 # HEADER
@@ -236,6 +251,61 @@ st.divider()
 st.info(
     "Phase 2.1 - Foundation Loaded Successfully"
 )
+
+
+# =====================================================
+# STARTUP HEALTH CHECK
+# =====================================================
+
+def run_startup_health_check():
+    checks = []
+
+    def add(name, ok, message=""):
+        checks.append({"Component": name, "Status": "OK" if ok else "MISSING/ERROR", "Message": message})
+
+    add("Python", True, sys.version.split()[0])
+    for module_name in ["streamlit", "pandas", "numpy", "psycopg2"]:
+        try:
+            __import__(module_name)
+            add(module_name, True, "importable")
+        except Exception as exc:
+            add(module_name, False, str(exc))
+
+    for module_name in [
+        "os_brains.db", "os_brains.experience_memory", "os_brains.historical_analog_engine",
+        "os_brains.strategist", "os_brains.risk_manager", "os_brains.portfolio_manager",
+        "os_brains.reviewer", "os_brains.pipeline_manager",
+    ]:
+        try:
+            __import__(module_name, fromlist=["*"])
+            add(module_name, True, "importable")
+        except Exception as exc:
+            add(module_name, False, str(exc))
+
+    try:
+        from os_brains.db import apply_schema
+        apply_schema()
+        add("Database", True, "schema reachable")
+    except Exception as exc:
+        add("Database", False, str(exc))
+
+    add("Configuration", bool(CONFIG), f"{len(CONFIG)} settings loaded")
+    st.session_state.startup_health = checks
+    return checks
+
+
+def show_startup_health_check():
+    if not st.session_state.startup_health:
+        run_startup_health_check()
+    unhealthy = [c for c in st.session_state.startup_health if c["Status"] != "OK"]
+    with st.expander("Startup Health Check", expanded=bool(unhealthy)):
+        st.dataframe(pd.DataFrame(st.session_state.startup_health), use_container_width=True)
+        if unhealthy:
+            st.error("AlphaQuant can start, but one or more services need attention before the full pipeline can complete.")
+        else:
+            st.success("All startup checks passed.")
+
+show_startup_health_check()
 # =====================================================
 # UNIVERSE ENGINE
 # VERSION 2.1B
@@ -403,7 +473,7 @@ with st.expander("Universe Preview"):
 # Manager below turns that - plus a few more NSE index-constituent
 # sources - into the actual, final list of symbols a scan will run
 # against, chosen and filtered by the user BEFORE any market data is
-# downloaded or any strategy runs. This keeps a "Run Complete Scan" (or,
+# downloaded or any strategy runs. This keeps a "RUN ALPHAQUANT" (or,
 # later, an automated scan) from blindly crawling the whole exchange
 # every time.
 #
@@ -663,7 +733,7 @@ def build_scan_universe(
     """
     The Scan Manager's single public entry point: given a universe choice
     and the pre-scan filters, returns the final symbol list a scan should
-    run against. Both the manual "Build Scan List" button below and any
+    run against. Both the manual "Preview Scan List" button below and any
     future automated scan trigger call this same function, so there is
     exactly one place universe + filter logic lives.
     """
@@ -827,7 +897,7 @@ st.checkbox(
          "short-selling logic to disable.",
 )
 
-if st.button("Build Scan List", key="scan_manager_build_button"):
+if st.button("Preview Scan List", key="scan_manager_build_button"):
 
     with st.spinner("Building scan universe..."):
 
@@ -1039,30 +1109,22 @@ def download_market_data(symbols):
 
 
 # =====================================================
-# DOWNLOAD BUTTON
+# MARKET DATA ENGINE STATUS
 # =====================================================
 
 st.divider()
 
 st.subheader("Market Data Engine")
 
-if not st.session_state.scan_universe:
+st.caption("Market data downloads automatically when RUN ALPHAQUANT is pressed.")
 
-    st.warning("Build a scan list in Scan Manager above before downloading data.")
+if st.session_state.market_data:
 
-elif st.button("Download Scan Universe"):
+    st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
 
-    st.session_state.market_data = download_market_data(
+else:
 
-        st.session_state.scan_universe
-
-    )
-
-    st.success(
-
-        "Download Finished"
-
-    )
+    st.info("No market data loaded yet. Press RUN ALPHAQUANT to build the universe and download data automatically.")
 # =====================================================
 # CONFIGURATION SIDEBAR
 # VERSION 2.1D
@@ -3139,45 +3201,77 @@ st.divider()
 st.subheader("AlphaQuant Scanner")
 
 
-def run_automated_cycle(trigger="MANUAL"):
-    """
-    The single entry point for "run everything end-to-end": download the
-    Scan Manager's chosen universe fresh, then run the full pipeline
-    (Brains -> AI Consensus -> Risk Manager -> Portfolio Manager -> trade
-    execution -> Experience Memory -> position monitoring). Both the
-    manual "Run Complete Scan" button and the autonomous trading loop
-    call this same function, so there is exactly one "do a scan cycle"
-    code path regardless of what triggered it - no separate manual
-    download step required in between.
-    """
+def _pipeline_event(event):
+    st.session_state.pipeline_events.append({
+        "Time": event.timestamp.strftime("%H:%M:%S"),
+        "Stage": event.step,
+        "Status": event.status,
+        "Message": event.message,
+    })
+    st.session_state.brain_status[event.step] = event.status
 
-    if not st.session_state.scan_universe:
-        return False, "No scan universe built yet - use Scan Manager above."
 
-    st.session_state.market_data = download_market_data(
-        st.session_state.scan_universe
+def build_default_scan_universe_for_pipeline():
+    st.session_state.scan_universe = build_scan_universe(
+        scan_universe_choice,
+        cap_filter=scan_cap_filter,
+        price_range=scan_price_range,
+        min_volume=scan_min_volume,
+        min_turnover=scan_min_turnover,
+        sectors=scan_sector_filter,
+        styles=scan_style_filter,
     )
+    st.session_state.scan_manager_active_styles = scan_style_filter
+    return f"{len(st.session_state.scan_universe)} symbols"
 
-    if len(st.session_state.market_data) == 0:
-        return False, "Market data download returned no symbols."
+
+def run_alphaquant(trigger="MANUAL"):
+    """One professional workflow entry point for the RUN ALPHAQUANT button."""
+    from os_brains.pipeline_manager import PipelineManager, PipelineStep
+
+    st.session_state.pipeline_events = []
+    st.session_state.brain_status = {}
+    st.session_state.decision_funnel = []
+    st.session_state.no_trade_explanation = []
+
+    manager = PipelineManager(on_event=_pipeline_event)
+
+    def download_stage():
+        if not st.session_state.scan_universe:
+            return False
+        st.session_state.market_data = download_market_data(st.session_state.scan_universe)
+        return f"{len(st.session_state.market_data)} datasets" if st.session_state.market_data else False
+
+    ok = manager.run([
+        PipelineStep("Build Universe", build_default_scan_universe_for_pipeline, "Building selected universe"),
+        PipelineStep("Download Data", download_stage, "Downloading OHLCV data"),
+    ])
+
+    if not ok:
+        return False, "AlphaQuant stopped before scan execution. See Mission Control logs."
 
     st.session_state.run_complete_scan_requested = True
-
     st.session_state.last_cycle_time = datetime.now()
     st.session_state.last_cycle_trigger = trigger
+    return True, f"RUN ALPHAQUANT queued: {len(st.session_state.market_data)} symbols."
 
-    return True, f"Cycle queued ({trigger}): {len(st.session_state.market_data)} symbols."
+
+def run_automated_cycle(trigger="AUTONOMOUS"):
+    """Autonomous loop compatibility wrapper around the one-button workflow."""
+    return run_alphaquant(trigger=trigger)
 
 
-if st.button("Run Complete Scan"):
+if st.button("RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary"):
 
-    ok, msg = run_automated_cycle(trigger="MANUAL")
+    ok, msg = run_alphaquant(trigger="MANUAL")
 
     if ok:
-        st.info(msg + " Initializing all strategy modules before execution.")
+        st.success(msg)
     else:
         st.warning(msg)
 
+# =====================================================
+# TRADE VALIDATOR ENGINE
 # =====================================================
 # TRADE VALIDATOR ENGINE
 # VERSION 3.2A
@@ -4604,140 +4698,161 @@ def execute_selected_portfolio():
 
         get_execution_engine().open_trade(trade)
 
+def _append_funnel(stage, entered, exited, rejected=0, reasons=None):
+    reasons = reasons or []
+    st.session_state.decision_funnel.append({
+        "Stage": stage,
+        "Entered": int(entered or 0),
+        "Exited": int(exited or 0),
+        "Rejected": int(rejected or 0),
+        "Rejection Reasons": " | ".join(reasons),
+    })
+
+
+def _collect_no_trade_explanation():
+    reasons = []
+    veto_counts = {}
+    for trade in st.session_state.final_trade_list:
+        verdict = getattr(trade, "risk_verdict", {}) or {}
+        if verdict.get("verdict") == "VETOED":
+            labels = verdict.get("vetoed_by") or ["Risk Manager veto"]
+            for label in labels:
+                veto_counts[label] = veto_counts.get(label, 0) + 1
+    for label, count in sorted(veto_counts.items()):
+        reasons.append(f"Risk Manager rejected {count} candidate(s): {label}.")
+    no_capital = [t for t in st.session_state.final_trade_list if getattr(t, "state", "") == "APPROVED_NO_CAPITAL"]
+    if no_capital:
+        reasons.append(f"Portfolio Exposure rejected {len(no_capital)} approved candidate(s).")
+    weak_analog = [
+        t for t in st.session_state.final_trade_list
+        if (getattr(t, "analog_report", {}) or {}).get("sample_confidence") == "LOW"
+    ]
+    if weak_analog:
+        reasons.append(f"Historical Analog evidence was weak for {len(weak_analog)} candidate(s).")
+    negative_ev = [t for t in st.session_state.final_trade_list if (getattr(t, "expected_value", 0) or 0) < 0]
+    if negative_ev:
+        reasons.append(f"Expected Value was negative for {len(negative_ev)} candidate(s).")
+    if not reasons:
+        reasons.append("No stock satisfied the minimum evidence threshold across strategy, risk, portfolio and consensus stages.")
+    st.session_state.no_trade_explanation = reasons
+    return reasons
+
+
 def execute_scan_pipeline():
+    from os_brains.pipeline_manager import PipelineManager, PipelineStep
 
-    st.session_state.trade_candidates = {}
+    manager = PipelineManager(on_event=_pipeline_event)
 
-    st.session_state.final_trade_list = []
+    def initialize_stage():
+        st.session_state.trade_candidates = {}
+        st.session_state.final_trade_list = []
+        st.session_state.selected_portfolio = []
+        st.session_state.decision_funnel = []
+        calculate_sector_strength()
+        fetch_nifty_benchmark()
+        prefetch_news_earnings(list(st.session_state.market_data.keys()))
+        _append_funnel("Universe", len(st.session_state.market_data), len(st.session_state.market_data), 0, [])
+        return f"{len(st.session_state.market_data)} symbols initialized"
 
-    # Calculate sector rankings once
-    calculate_sector_strength()
+    def scan_stage():
+        total = len(st.session_state.market_data)
+        progress = st.progress(0) if total else None
+        status = st.empty()
+        quality_pass = structure_pass = processed = 0
+        candidate_reasons = []
 
-    # Batch 1: load NIFTY benchmark once for Relative Strength calculations
-    fetch_nifty_benchmark()
-
-    # Batch 2: prefetch earnings/news for every symbol once, concurrently,
-    # instead of hitting the network per symbol inside the loop below.
-    prefetch_news_earnings(list(st.session_state.market_data.keys()))
-
-    total = len(st.session_state.market_data)
-
-    progress = st.progress(0)
-
-    status = st.empty()
-
-    for index, (symbol, df) in enumerate(
-
-
-        st.session_state.market_data.items(),
-
-        start=1
-
-    ):
-
-        progress.progress(index / total)
-
-        status.write(f"Scanning : {symbol}")
-
-        df = calculate_indicators(df)
-
-        if df is None:
-
-            continue
-
-        stock = get_stock(symbol)
-
-        stock.set_dataframe(df)
-
-        calculate_trade_quality(stock)
-
-        update_market_structure(stock)
-
-        # Batch 1: Multi-Timeframe / Relative Strength / Sector / Volume Profile
-        run_batch1_signal_engines(stock)
-
-        registered_names = [s.name for s in st.session_state.strategy_registry if s.enabled]
-
-        candidates_before = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
-
-        run_all_strategies(stock)
-
-        # Batch 2: False Breakout / Smart Money / Institutional Activity /
-        # News & Earnings - must run after strategies so BOS/CHOCH/Order
-        # Block/Liquidity Sweep/FVG patterns are already populated.
-        run_batch2_signal_engines(stock)
-
-        candidates_after = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
-
-        new_candidate_keys = candidates_after - candidates_before
-
-        logging.info(
-
-            f"SCAN symbol={symbol} tqi={stock.score.get('quality')} "
-
-            f"trend={stock.market.get('TREND')} "
-
-            f"registered_strategies={registered_names} "
-
-            f"candidates_created={sorted(new_candidate_keys)}"
-
-        )
-
-        for trade in list(
-
-            st.session_state.trade_candidates.values()
-
-        ):
-
-            if trade.symbol != symbol:
-
+        for index, (symbol, df) in enumerate(st.session_state.market_data.items(), start=1):
+            if progress:
+                progress.progress(index / total)
+            status.write(f"Scanning : {symbol}")
+            df = calculate_indicators(df)
+            if df is None:
+                candidate_reasons.append(f"{symbol}: indicator calculation failed")
                 continue
 
-            validate_trade_candidate(
+            stock = get_stock(symbol)
+            stock.set_dataframe(df)
+            calculate_trade_quality(stock)
+            processed += 1
+            if (stock.score.get("quality") or 0) > 0:
+                quality_pass += 1
+            update_market_structure(stock)
+            if stock.market.get("TREND") or stock.patterns.get("BOS") or stock.patterns.get("CHOCH"):
+                structure_pass += 1
 
-                stock,
+            run_batch1_signal_engines(stock)
+            candidates_before = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
+            run_all_strategies(stock)
+            run_batch2_signal_engines(stock)
+            candidates_after = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
+            if not (candidates_after - candidates_before):
+                candidate_reasons.append(f"{symbol}: no strategy setup triggered")
 
-                trade
+            for trade in list(st.session_state.trade_candidates.values()):
+                if trade.symbol != symbol:
+                    continue
+                validate_trade_candidate(stock, trade)
+                apply_sector_bonus(stock, trade)
+                calculate_position_size(trade)
 
-            )
+        _append_funnel("Trade Quality", total, quality_pass, total - quality_pass, ["insufficient indicator/quality score"] if total - quality_pass else [])
+        _append_funnel("Market Structure", processed, structure_pass, processed - structure_pass, ["trend/BOS/CHOCH structure not strong enough"] if processed - structure_pass else [])
+        raw_symbols = len({t.symbol for t in st.session_state.trade_candidates.values()})
+        _append_funnel("Strategist", processed, raw_symbols, max(0, processed - raw_symbols), candidate_reasons[:25])
+        return f"{len(st.session_state.trade_candidates)} raw candidates"
 
-            # Batch 1: fold sector strength into per-trade confidence
-            apply_sector_bonus(stock, trade)
+    def consensus_stage():
+        before = len(st.session_state.trade_candidates)
+        final_list = build_ai_consensus()
+        analog_reject = [t.symbol for t in final_list if (getattr(t, "analog_report", {}) or {}).get("sample_confidence") == "LOW"]
+        _append_funnel("Historical Analog", before, len(final_list) - len(analog_reject), len(analog_reject), [f"{s}: Historical Analog too weak" for s in analog_reject[:25]])
+        approved = [t for t in final_list if getattr(t, "risk_verdict", {}).get("verdict") == "APPROVED"]
+        risk_reasons = []
+        for t in final_list:
+            verdict = getattr(t, "risk_verdict", {}) or {}
+            if verdict.get("verdict") == "VETOED":
+                risk_reasons.append(f"{t.symbol}: {verdict.get('reason', 'Risk Manager veto')}")
+        _append_funnel("Risk Manager", len(final_list), len(approved), len(final_list) - len(approved), risk_reasons[:25])
+        _append_funnel("AI Consensus", before, len(final_list), max(0, before - len(final_list)), [])
+        return f"{len(final_list)} consensus candidates; {len(approved)} approved"
 
-            calculate_position_size(
+    def portfolio_stage():
+        approved = [t for t in st.session_state.final_trade_list if getattr(t, "risk_verdict", {}).get("verdict") == "APPROVED"]
+        selected = allocate_portfolio()
+        rejected = [t for t in approved if t.state != "ALLOCATED"]
+        _append_funnel("Portfolio Manager", len(approved), len(selected), len(rejected), [f"{t.symbol}: {getattr(t, 'allocation_rationale', 'Portfolio correlation/exposure')}" for t in rejected[:25]])
+        _append_funnel("Final Trades", len(st.session_state.final_trade_list), len(selected), len(st.session_state.final_trade_list) - len(selected), [])
+        return f"{len(selected)} allocated trades"
 
-                trade
+    def paper_stage():
+        execute_selected_portfolio()
+        monitor_open_positions()
+        return f"{len(st.session_state.paper_positions)} open paper positions"
 
-            )
+    def reviewer_memory_stage():
+        reviewed = len(st.session_state.get("closed_positions", []))
+        _collect_no_trade_explanation()
+        return f"Experience Memory updated; reviewer has {reviewed} closed position(s) available"
 
-            logging.info(
+    ok = manager.run([
+        PipelineStep("Market Observer", initialize_stage, "Preparing market context"),
+        PipelineStep("Market Historian", lambda: "Regime catalog/context available", "Historian ready"),
+        PipelineStep("Trade Candidate Engine", scan_stage, "Running indicators, Batch 1, Batch 2 and strategies"),
+        PipelineStep("Historical Analog Engine", consensus_stage, "Strategist, analog evidence, risk and consensus"),
+        PipelineStep("Strategist", lambda: "Strategist evidence included in consensus", "Completed"),
+        PipelineStep("Risk Manager", lambda: "Risk verdicts captured", "Completed"),
+        PipelineStep("Portfolio Manager", portfolio_stage, "Allocating approved trades"),
+        PipelineStep("AI Consensus", lambda: "Consensus ranking refreshed", "Completed"),
+        PipelineStep("Paper Trading Engine", paper_stage, "Opening/monitoring paper trades"),
+        PipelineStep("Reviewer", reviewer_memory_stage, "Recording learning updates"),
+        PipelineStep("Experience Memory", lambda: "Decision memory synchronized", "Completed"),
+        PipelineStep("Dashboard Refresh", lambda: "Mission Control refreshed", "Completed"),
+    ])
 
-                f"VALIDATE symbol={symbol} strategy={trade.strategy} "
-
-                f"state={trade.state} rr={getattr(trade, 'risk_reward', None)} "
-
-                f"missing_triggers={getattr(trade, 'missing_triggers', None)}"
-
-            )
-
-    build_ai_consensus()
-
-    allocate_portfolio()
-
-    # Brain 6 (portfolio_manager) is the final authority on sizing for
-    # allocated trades - update_trade_position_sizes() used to run here
-    # and would silently overwrite that sizing with flat per-trade risk
-    # sizing, so it has been removed from this pipeline.
-
-    execute_selected_portfolio()
-
-    monitor_open_positions()
-
-    status.success(
-
-        "Pipeline Completed Successfully"
-
-    )
+    if ok:
+        st.success("Pipeline Completed Successfully")
+    else:
+        st.error("Pipeline stopped. See Mission Control logs.")
 # =====================================================
 # VCP ENGINE
 # VERSION 3.6A
@@ -8516,6 +8631,82 @@ def show_alphaquant_os_panel():
             st.warning(f"Historical Analog Engine unavailable: {e}")
 
 
+def show_mission_control():
+    st.divider()
+    st.header("Mission Control")
+
+    if st.session_state.get("last_cycle_time"):
+        st.caption(
+            f"Last run: {st.session_state.last_cycle_time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({st.session_state.get('last_cycle_trigger', 'UNKNOWN')})"
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Universe", len(st.session_state.get("scan_universe", [])))
+    c2.metric("Downloaded", len(st.session_state.get("market_data", {})))
+    c3.metric("Candidates", len(st.session_state.get("trade_candidates", {})))
+    c4.metric("Final Trades", len(st.session_state.get("selected_portfolio", [])))
+
+    tab_progress, tab_funnel, tab_trades, tab_learning, tab_portfolio = st.tabs([
+        "Live Progress", "Decision Funnel", "Final Trades", "Learning & Reviewer", "Portfolio"
+    ])
+
+    with tab_progress:
+        if st.session_state.get("brain_status"):
+            st.dataframe(
+                pd.DataFrame([
+                    {"Brain/Stage": k, "Status": v}
+                    for k, v in st.session_state.brain_status.items()
+                ]),
+                use_container_width=True,
+            )
+        if st.session_state.get("pipeline_events"):
+            st.dataframe(pd.DataFrame(st.session_state.pipeline_events), use_container_width=True)
+        else:
+            st.info("Press RUN ALPHAQUANT to start the complete workflow.")
+
+    with tab_funnel:
+        if st.session_state.get("decision_funnel"):
+            st.dataframe(pd.DataFrame(st.session_state.decision_funnel), use_container_width=True)
+        else:
+            st.info("Decision funnel will populate after RUN ALPHAQUANT.")
+        if not st.session_state.get("selected_portfolio") and st.session_state.get("no_trade_explanation"):
+            st.warning("No trade today.")
+            for reason in st.session_state.no_trade_explanation:
+                st.write(f"- {reason}")
+
+    with tab_trades:
+        final_df = get_final_trade_dataframe()
+        if len(final_df):
+            st.dataframe(final_df, use_container_width=True)
+        elif st.session_state.get("no_trade_explanation"):
+            st.warning("No trade today.")
+            for reason in st.session_state.no_trade_explanation:
+                st.write(f"- {reason}")
+        else:
+            st.info("Final trades will appear after the pipeline completes.")
+
+    with tab_learning:
+        st.subheader("Learning Updates")
+        if st.session_state.get("no_trade_explanation"):
+            for reason in st.session_state.no_trade_explanation:
+                st.write(f"- {reason}")
+        st.subheader("Reviewer Output")
+        if st.session_state.get("closed_positions"):
+            st.write(f"Closed positions available for reviewer: {len(st.session_state.closed_positions)}")
+        else:
+            st.caption("No closed paper trades have reached reviewer yet.")
+
+    with tab_portfolio:
+        pdf = portfolio_dataframe()
+        if len(pdf):
+            st.dataframe(pdf, use_container_width=True)
+        else:
+            st.caption("No allocated portfolio positions from the latest run.")
+
+
+show_mission_control()
+
 show_market_dashboard()
 
 show_ai_summary()
@@ -8547,7 +8738,9 @@ if st.session_state.run_complete_scan_requested:
 
     else:
 
-        st.info("No Trade Candidates Found")
+        st.warning("No trade today.")
+        for reason in _collect_no_trade_explanation():
+            st.write(f"- {reason}")
 
 # =====================================================
 # AUTONOMOUS TRADING LOOP
@@ -8646,7 +8839,7 @@ st.caption(
     "Runs the Scan Manager's chosen universe through the full pipeline "
     "and monitors open positions on its own while the market is open and "
     "this tab stays connected. It reuses run_automated_cycle() - the same "
-    "code path 'Run Complete Scan' uses - so there is one pipeline, "
+    "code path 'RUN ALPHAQUANT' uses - so there is one pipeline, "
     "triggered manually or automatically."
 )
 
