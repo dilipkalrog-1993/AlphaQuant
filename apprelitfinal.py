@@ -197,6 +197,9 @@ if "autonomous_active" not in st.session_state:
 if "pipeline_events" not in st.session_state:
     st.session_state.pipeline_events = []
 
+if "pipeline_failure" not in st.session_state:
+    st.session_state.pipeline_failure = None
+
 if "brain_status" not in st.session_state:
     st.session_state.brain_status = {}
 
@@ -415,7 +418,7 @@ def fetch_complete_nse_universe():
 
 ALL_SYMBOLS = fetch_complete_nse_universe()
 
-if developer_mode:
+if False:  # Universe diagnostics are rendered only from the Developer workspace.
     st.success(
 
         f"Universe Loaded : {len(ALL_SYMBOLS)} Stocks"
@@ -610,15 +613,14 @@ def get_cap_bucket_symbols(bucket):
 
 
 SCAN_STYLE_STRATEGY_MAP = {
-
-    "Breakout": {"BREAKOUT"},
-
+    "FVG": {"FVG"},
+    "VCP": {"VCP"},
+    "Order Block": {"ORDER BLOCK"},
+    "Price Squeeze": {"PRICE SQUEEZE"},
     "Momentum": {"VCP", "PRICE SQUEEZE"},
-
-    "Swing": {"DEMAND & SUPPLY", "MARKET REGIME"},
-
-    "Intraday": {"ORDER BLOCK", "FVG"},
-
+    "Reversal": {"DEMAND & SUPPLY"},
+    "Breakout": {"BREAKOUT"},
+    "Trend": {"MARKET REGIME"},
 }
 
 
@@ -782,11 +784,7 @@ def build_scan_universe(
 # SCAN MANAGER UI
 # =====================================================
 
-if developer_mode:
-    st.divider()
-    st.subheader("Developer Mode · Scan Configuration")
-
-# Operator defaults keep the one-button workflow functional without exposing tuning controls.
+# Operator defaults keep the one-button workflow functional.
 scan_universe_choice = st.session_state.get("scan_manager_universe_choice", SCAN_UNIVERSE_CHOICES[0])
 scan_cap_filter = st.session_state.get("scan_manager_cap_filter", "Any")
 scan_price_range = st.session_state.get("scan_manager_price_range", (20, 20000))
@@ -794,149 +792,16 @@ scan_min_volume = st.session_state.get("scan_manager_min_volume", CONFIG["MIN_AV
 scan_min_turnover = st.session_state.get("scan_manager_min_turnover", CONFIG["MIN_AVG_TURNOVER"])
 scan_sector_filter = st.session_state.get("scan_manager_sector_filter", [])
 scan_style_filter = st.session_state.get("scan_manager_style_filter", [])
-
-if developer_mode:
-    with st.expander("Advanced Scan", expanded=False):
-
-        if "scan_universe" not in st.session_state:
-            st.session_state.scan_universe = []
-
-        with st.expander("Watchlist"):
-
-            watchlist_cols = st.columns([3, 1])
-
-            new_watch_symbol = watchlist_cols[0].text_input(
-                "Add symbol (e.g. RELIANCE)",
-                key="watchlist_add_input",
-            )
-
-            if watchlist_cols[1].button("Add", key="watchlist_add_button"):
-
-                cleaned = new_watch_symbol.strip().upper().replace(".NS", "")
-
-                if cleaned and cleaned not in st.session_state.watchlist:
-                    st.session_state.watchlist.append(cleaned)
-
-            if st.session_state.watchlist:
-
-                st.write(", ".join(st.session_state.watchlist))
-
-                remove_choice = st.selectbox(
-                    "Remove from watchlist",
-                    ["-"] + st.session_state.watchlist,
-                    key="watchlist_remove_select",
-                )
-
-                if remove_choice != "-" and st.button("Remove", key="watchlist_remove_button"):
-                    st.session_state.watchlist.remove(remove_choice)
-
-            else:
-
-                st.caption("Watchlist is empty.")
-
-        scan_manager_cols = st.columns(2)
-
-        scan_universe_choice = scan_manager_cols[0].selectbox(
-            "Universe",
-            SCAN_UNIVERSE_CHOICES,
-            key="scan_manager_universe_choice",
-        )
-
-        scan_cap_filter = scan_manager_cols[1].selectbox(
-            "Market Cap",
-            ["Any", "Large Cap", "Mid Cap", "Small Cap"],
-            key="scan_manager_cap_filter",
-        )
-
-        scan_price_range = st.slider(
-            "Price Range (Rs)",
-            min_value=0,
-            max_value=20000,
-            value=(20, 20000),
-            key="scan_manager_price_range",
-        )
-
-        scan_min_volume = st.number_input(
-            "Minimum Average Volume (5-day)",
-            min_value=0,
-            value=CONFIG["MIN_AVG_VOLUME"],
-            step=1000,
-            key="scan_manager_min_volume",
-        )
-
-        scan_min_turnover = st.number_input(
-            "Liquidity - Minimum Average Turnover (Rs, 5-day)",
-            min_value=0,
-            value=CONFIG["MIN_AVG_TURNOVER"],
-            step=1000000,
-            key="scan_manager_min_turnover",
-        )
-
-        scan_sector_filter = st.multiselect(
-            "Sector (known-sector map only; leave empty for no sector restriction)",
-            sorted(set(STOCK_SECTOR_MAP.values())),
-            key="scan_manager_sector_filter",
-        )
-
-        scan_style_filter = st.multiselect(
-            "Technical / Patterns (strategy types; leave empty for all)",
-            sorted(SCAN_STYLE_STRATEGY_MAP.keys()),
-            key="scan_manager_style_filter",
-        )
-
-        st.checkbox(
-            "Long Only",
-            value=True,
-            disabled=True,
-            help="AlphaQuant is a long-only platform end-to-end -- there is no "
-                 "short-selling logic to disable.",
-        )
-
-        if developer_mode and st.button("Preview Scan List", key="scan_manager_build_button"):
-
-            with st.spinner("Building scan universe..."):
-
-                st.session_state.scan_universe = build_scan_universe(
-                    scan_universe_choice,
-                    cap_filter=scan_cap_filter,
-                    price_range=scan_price_range,
-                    min_volume=scan_min_volume,
-                    min_turnover=scan_min_turnover,
-                    sectors=scan_sector_filter,
-                    styles=scan_style_filter,
-                )
-
-                st.session_state.scan_manager_active_styles = scan_style_filter
-
-        if developer_mode and st.session_state.scan_universe:
-
-            st.success(
-                f"Scan list ready: {len(st.session_state.scan_universe)} symbols "
-                f"selected for the next scan."
-            )
-
-            with st.expander("Scan List Preview"):
-                st.dataframe(
-                    pd.DataFrame(
-                        {"Symbol": st.session_state.scan_universe}
-                    ).head(200)
-                )
-
-        elif developer_mode:
-
-            st.info("Build a scan list above before downloading data or running a scan.")
-
-    # =====================================================
-    # PRODUCTION DOWNLOAD MANAGER
-    # VERSION 2.1C
-    # =====================================================
-
-    DOWNLOAD_STATUS = st.empty()
-
-    DOWNLOAD_PROGRESS = st.progress(0)
+if "scan_universe" not in st.session_state:
+    st.session_state.scan_universe = []
 
 
-    def split_into_batches(symbols, batch_size):
+# =====================================================
+# PRODUCTION DOWNLOAD MANAGER
+# VERSION 2.1C
+# =====================================================
+
+def split_into_batches(symbols, batch_size):
 
         return [
 
@@ -955,7 +820,7 @@ if developer_mode:
         ]
 
 
-    def download_batch(batch):
+def download_batch(batch):
 
         """
         Downloads one batch.
@@ -1020,7 +885,7 @@ if developer_mode:
         return results
 
 
-    def download_market_data(symbols):
+def download_market_data(symbols):
 
         logging.info(
 
@@ -1039,6 +904,11 @@ if developer_mode:
         complete = {}
 
         total = len(batches)
+        if not total:
+            return complete
+
+        download_status = st.empty()
+        download_progress = st.progress(0)
 
         start = time.time()
 
@@ -1068,13 +938,13 @@ if developer_mode:
 
                 complete.update(data)
 
-                DOWNLOAD_PROGRESS.progress(
+                download_progress.progress(
 
                     (idx + 1) / total
 
                 )
 
-                DOWNLOAD_STATUS.write(
+                download_status.write(
 
                     f"Completed Batch {idx+1} / {total}"
 
@@ -1102,70 +972,6 @@ if developer_mode:
 
         return complete
 
-
-# =====================================================
-# MARKET DATA ENGINE STATUS
-# =====================================================
-
-if developer_mode:
-    st.subheader("Developer Mode · Market Data")
-    if st.session_state.market_data:
-        st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
-    else:
-        st.info("No market data loaded yet.")
-# =====================================================
-# CONFIGURATION SIDEBAR
-# VERSION 2.1D
-# =====================================================
-
-if developer_mode:
-  with st.expander("Advanced Scan Settings", expanded=False):
-    CONFIG["DOWNLOAD_PERIOD"] = st.selectbox(
-    "History",
-    ["6mo", "1y", "2y", "5y"],
-    index=1
-)
-
-    CONFIG["DOWNLOAD_INTERVAL"] = st.selectbox(
-    "Interval",
-    ["1d", "1wk"],
-    index=0
-)
-
-    CONFIG["DOWNLOAD_BATCH"] = st.slider(
-    "Batch Size",
-    min_value=10,
-    max_value=100,
-    value=CONFIG["DOWNLOAD_BATCH"],
-    step=10
-)
-
-    CONFIG["MAX_WORKERS"] = st.slider(
-    "Parallel Workers",
-    min_value=2,
-    max_value=16,
-    value=CONFIG["MAX_WORKERS"]
-)
-
-    CONFIG["MIN_PRICE"] = st.number_input(
-    "Minimum Stock Price (₹)",
-    min_value=1,
-    value=CONFIG["MIN_PRICE"]
-)
-
-    CONFIG["MIN_AVG_VOLUME"] = st.number_input(
-    "Minimum Average Daily Volume",
-    min_value=1000,
-    value=CONFIG["MIN_AVG_VOLUME"],
-    step=1000
-)
-
-    CONFIG["MAX_OPEN_POSITIONS"] = st.slider(
-    "Maximum Open Positions",
-    min_value=1,
-    max_value=20,
-    value=CONFIG["MAX_OPEN_POSITIONS"]
-)
 
 # =====================================================
 # INDICATOR ENGINE
@@ -3194,17 +3000,35 @@ def _pipeline_event(event):
     st.session_state.brain_status[event.step] = event.status
 
 
+def _capture_pipeline_failure(stage, action):
+    """Keep the PipelineManager boundary while preserving developer failures."""
+    def wrapped_action():
+        try:
+            return action()
+        except Exception as exc:
+            st.session_state.pipeline_failure = {
+                "Stage": stage,
+                "Exception Type": type(exc).__name__,
+                "Exception Message": str(exc),
+                "Traceback": traceback.format_exc(),
+            }
+            logging.exception("Pipeline stage failed: %s", stage)
+            raise
+
+    return wrapped_action
+
+
 def build_default_scan_universe_for_pipeline():
     st.session_state.scan_universe = build_scan_universe(
-        scan_universe_choice,
-        cap_filter=scan_cap_filter,
-        price_range=scan_price_range,
-        min_volume=scan_min_volume,
-        min_turnover=scan_min_turnover,
-        sectors=scan_sector_filter,
-        styles=scan_style_filter,
+        st.session_state.get("scan_manager_universe_choice", SCAN_UNIVERSE_CHOICES[0]),
+        cap_filter=st.session_state.get("scan_manager_cap_filter", "Any"),
+        price_range=st.session_state.get("scan_manager_price_range", (20, 20000)),
+        min_volume=st.session_state.get("scan_manager_min_volume", CONFIG["MIN_AVG_VOLUME"]),
+        min_turnover=st.session_state.get("scan_manager_min_turnover", CONFIG["MIN_AVG_TURNOVER"]),
+        sectors=st.session_state.get("scan_manager_sector_filter", []),
+        styles=st.session_state.get("scan_manager_style_filter", []),
     )
-    st.session_state.scan_manager_active_styles = scan_style_filter
+    st.session_state.scan_manager_active_styles = st.session_state.get("scan_manager_style_filter", [])
     return f"{len(st.session_state.scan_universe)} symbols"
 
 
@@ -3216,22 +3040,30 @@ def run_alphaquant(trigger="MANUAL"):
     st.session_state.brain_status = {}
     st.session_state.decision_funnel = []
     st.session_state.no_trade_explanation = []
+    st.session_state.pipeline_failure = None
 
     manager = PipelineManager(on_event=_pipeline_event)
 
     def download_stage():
         if not st.session_state.scan_universe:
-            return False
+            raise RuntimeError("Universe selection produced no symbols to download")
         st.session_state.market_data = download_market_data(st.session_state.scan_universe)
-        return f"{len(st.session_state.market_data)} datasets" if st.session_state.market_data else False
+        if not st.session_state.market_data:
+            raise RuntimeError("Download completed without usable OHLCV datasets")
+        return f"{len(st.session_state.market_data)} datasets"
 
     ok = manager.run([
-        PipelineStep("Build Universe", build_default_scan_universe_for_pipeline, "Building selected universe"),
-        PipelineStep("Download Data", download_stage, "Downloading OHLCV data"),
+        PipelineStep("Build Universe", _capture_pipeline_failure("Build Universe", build_default_scan_universe_for_pipeline), "Building selected universe"),
+        PipelineStep("Download Data", _capture_pipeline_failure("Download Data", download_stage), "Downloading OHLCV data"),
     ])
 
     if not ok:
-        return False, "AlphaQuant stopped before scan execution. See Mission Control logs."
+        failure = st.session_state.pipeline_failure or {}
+        return False, (
+            f"FAILED — {failure.get('Stage', 'Pipeline')} — "
+            f"{failure.get('Exception Type', 'Stage failure')}: "
+            f"{failure.get('Exception Message', 'Stage returned no data')}"
+        )
 
     st.session_state.run_complete_scan_requested = True
     st.session_state.last_cycle_time = datetime.now()
@@ -3606,7 +3438,7 @@ def show_trade_history():
         st.info("No Closed Trades")
 
 
-if developer_mode:
+if False:  # Legacy standalone paper-trading panel; Mission Control owns this view.
     st.divider()
     st.subheader("Developer Mode · Paper Trading")
     paper_portfolio_summary()
@@ -4803,25 +4635,30 @@ def execute_scan_pipeline():
         return f"Experience Memory updated; reviewer has {reviewed} closed position(s) available"
 
     ok = manager.run([
-        PipelineStep("Market Observer", initialize_stage, "Preparing market context"),
-        PipelineStep("Market Historian", lambda: "Regime catalog/context available", "Historian ready"),
-        PipelineStep("Trade Candidate Engine", scan_stage, "Running indicators, Batch 1, Batch 2 and strategies"),
-        PipelineStep("Market Structure", lambda: "Market structure evaluated during candidate generation", "Completed"),
-        PipelineStep("Historical Analog", lambda: "Historical analog evidence is ready for consensus", "Completed"),
-        PipelineStep("Strategist", lambda: "Strategist evidence is ready for consensus", "Completed"),
-        PipelineStep("Risk Manager", lambda: "Risk verdicts are applied during consensus", "Completed"),
-        PipelineStep("AI Consensus", consensus_stage, "Building consensus and applying risk evidence"),
-        PipelineStep("Portfolio Manager", portfolio_stage, "Allocating approved trades"),
-        PipelineStep("Paper Trading", paper_stage, "Opening/monitoring paper trades"),
-        PipelineStep("Reviewer", reviewer_memory_stage, "Recording learning updates"),
-        PipelineStep("Experience Memory", lambda: "Decision memory synchronized", "Completed"),
-        PipelineStep("Dashboard Refresh", lambda: "Mission Control refreshed", "Completed"),
+        PipelineStep("Market Observer", _capture_pipeline_failure("Market Observer", initialize_stage), "Preparing market context"),
+        PipelineStep("Market Historian", _capture_pipeline_failure("Market Historian", lambda: "Regime catalog/context available"), "Historian ready"),
+        PipelineStep("Trade Candidate Engine", _capture_pipeline_failure("Trade Candidate Engine", scan_stage), "Running indicators, Batch 1, Batch 2 and strategies"),
+        PipelineStep("Market Structure", _capture_pipeline_failure("Market Structure", lambda: "Market structure evaluated during candidate generation"), "Completed"),
+        PipelineStep("Historical Analog", _capture_pipeline_failure("Historical Analog", lambda: "Historical analog evidence is ready for consensus"), "Completed"),
+        PipelineStep("Strategist", _capture_pipeline_failure("Strategist", lambda: "Strategist evidence is ready for consensus"), "Completed"),
+        PipelineStep("Risk Manager", _capture_pipeline_failure("Risk Manager", lambda: "Risk verdicts are applied during consensus"), "Completed"),
+        PipelineStep("AI Consensus", _capture_pipeline_failure("AI Consensus", consensus_stage), "Building consensus and applying risk evidence"),
+        PipelineStep("Portfolio Manager", _capture_pipeline_failure("Portfolio Manager", portfolio_stage), "Allocating approved trades"),
+        PipelineStep("Paper Trading", _capture_pipeline_failure("Paper Trading", paper_stage), "Opening/monitoring paper trades"),
+        PipelineStep("Reviewer", _capture_pipeline_failure("Reviewer", reviewer_memory_stage), "Recording learning updates"),
+        PipelineStep("Experience Memory", _capture_pipeline_failure("Experience Memory", lambda: "Decision memory synchronized"), "Completed"),
+        PipelineStep("Dashboard Refresh", _capture_pipeline_failure("Dashboard Refresh", lambda: "Mission Control refreshed"), "Completed"),
     ])
 
     if ok:
         st.success("Pipeline Completed Successfully")
     else:
-        st.error("Pipeline stopped. See Mission Control logs.")
+        failure = st.session_state.pipeline_failure or {}
+        st.error(
+            f"FAILED — {failure.get('Stage', 'Pipeline')} — "
+            f"{failure.get('Exception Type', 'Stage failure')}: "
+            f"{failure.get('Exception Message', 'See pipeline events for details.')}"
+        )
 # =====================================================
 # VCP ENGINE
 # VERSION 3.6A
@@ -8698,6 +8535,53 @@ def show_execution_timeline():
     st.caption("  •  ".join(labels))
 
 
+def show_advanced_scan_controls():
+    """Operator controls for the next run; engineering controls stay in Developer Mode."""
+    with st.expander("Advanced Scan", expanded=False):
+        first, second = st.columns(2)
+        first.selectbox("Universe", SCAN_UNIVERSE_CHOICES, key="scan_manager_universe_choice")
+        second.multiselect("Sector Filter", sorted(set(STOCK_SECTOR_MAP.values())), key="scan_manager_sector_filter")
+        first.selectbox("Market Cap", ["Any", "Large Cap", "Mid Cap", "Small Cap"], key="scan_manager_cap_filter")
+        second.slider("Price Filter", 0, 20000, value=(20, 20000), key="scan_manager_price_range")
+        first.number_input("Average Volume", min_value=0, value=CONFIG["MIN_AVG_VOLUME"], step=1000, key="scan_manager_min_volume")
+        second.number_input("Liquidity", min_value=0, value=CONFIG["MIN_AVG_TURNOVER"], step=1000000, key="scan_manager_min_turnover")
+        st.multiselect("Strategy Filter", list(SCAN_STYLE_STRATEGY_MAP), key="scan_manager_style_filter")
+        confidence, risk, positions = st.columns(3)
+        confidence.slider("AI Confidence", 0, 100, 0, key="scan_min_ai_confidence")
+        risk.selectbox("Risk Profile", ["Conservative", "Balanced", "Aggressive"], key="scan_risk_profile")
+        positions.number_input("Maximum Open Positions", min_value=1, max_value=20, value=CONFIG["MAX_OPEN_POSITIONS"], key="scan_max_open_positions")
+
+        preset_name = st.text_input("Preset Name", key="scan_preset_name")
+        save, load = st.columns(2)
+        if save.button("Save Preset", use_container_width=True):
+            if preset_name.strip():
+                st.session_state.setdefault("scan_presets", {})[preset_name.strip()] = {
+                    key: st.session_state.get(key) for key in (
+                        "scan_manager_universe_choice", "scan_manager_sector_filter", "scan_manager_cap_filter",
+                        "scan_manager_price_range", "scan_manager_min_volume", "scan_manager_min_turnover",
+                        "scan_manager_style_filter", "scan_min_ai_confidence", "scan_risk_profile", "scan_max_open_positions",
+                    )
+                }
+                st.success(f"Saved preset: {preset_name.strip()}")
+        preset_names = list(st.session_state.get("scan_presets", {}))
+        selected = load.selectbox("Load Preset", ["Select a preset"] + preset_names, key="scan_preset_to_load")
+        if selected != "Select a preset" and load.button("Apply Preset", use_container_width=True):
+            st.session_state.update(st.session_state["scan_presets"][selected])
+            st.rerun()
+
+
+def show_pipeline_failure(include_traceback=False):
+    failure = st.session_state.get("pipeline_failure")
+    if not failure:
+        return
+    st.error(
+        f"FAILED — {failure['Stage']} — {failure['Exception Type']}: "
+        f"{failure['Exception Message']}"
+    )
+    if include_traceback:
+        st.code(failure["Traceback"], language="text")
+
+
 def show_operator_workspace():
     """The sole normal-trader dashboard: concise, operational, and non-technical."""
     now_ist = datetime.now(IST)
@@ -8726,7 +8610,9 @@ def show_operator_workspace():
     filters.metric("Filters Summary", f"{scan_cap_filter} · {len(scan_sector_filter) or 'All'} sectors")
     if st.button("RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary", use_container_width=True):
         ok, msg = run_alphaquant(trigger="MANUAL")
-        (st.success if ok else st.warning)(msg)
+        (st.success if ok else st.error)(msg)
+    show_advanced_scan_controls()
+    show_pipeline_failure()
     show_execution_timeline()
 
     second = st.columns(3)
@@ -8769,26 +8655,30 @@ def show_developer_workspace():
     """All technical tooling is isolated here and never leaks into operator UI."""
     st.divider()
     st.header("Developer Mode")
-    pipeline, diagnostics, market_data, signals, strategies, database, logs, testing = st.tabs(
-        ["Pipeline", "Diagnostics", "Market Data", "Signals", "Strategies", "Database", "Logs", "Testing"])
+    health, diagnostics, pipeline, database, logs, testing, strategies, signals, performance, utilities = st.tabs(
+        ["Health Checks", "Diagnostics", "Pipeline", "Database", "Logs", "Testing", "Strategy Registry", "Signal Inspection", "Performance", "Developer Utilities"])
+    with health:
+        show_startup_health_check()
+    with diagnostics:
+        st.dataframe(get_trade_candidates(), use_container_width=True)
     with pipeline:
         show_mission_control()
-    with diagnostics:
-        show_startup_health_check()
-        st.dataframe(get_trade_candidates(), use_container_width=True)
-    with market_data:
-        st.write(f"Loaded datasets: {len(st.session_state.market_data)}")
-    with signals:
-        st.dataframe(get_batch1_signals_dataframe(), use_container_width=True)
-        st.dataframe(get_batch2_signals_dataframe(), use_container_width=True)
-    with strategies:
-        show_registered_strategies()
+        show_pipeline_failure(include_traceback=True)
     with database:
         show_alphaquant_os_panel()
     with logs:
         st.caption("Technical logs are written to logs/alphaquant.log.")
     with testing:
         st.caption("Startup health checks and pipeline diagnostics are available in the tabs above.")
+    with strategies:
+        show_registered_strategies()
+    with signals:
+        st.dataframe(get_batch1_signals_dataframe(), use_container_width=True)
+        st.dataframe(get_batch2_signals_dataframe(), use_container_width=True)
+    with performance:
+        st.dataframe(portfolio_dataframe(), use_container_width=True)
+    with utilities:
+        st.write(f"Loaded datasets: {len(st.session_state.market_data)}")
 
 
 show_operator_workspace()
@@ -8907,7 +8797,7 @@ def quick_refresh_open_positions():
             remove_open_position(symbol)
 
 
-if developer_mode:
+if False:  # Autonomous controls are intentionally not part of the RC1 operator surface.
     st.divider()
 
     st.subheader("Autonomous Trading Loop")
@@ -9016,5 +8906,5 @@ def autonomous_loop_fragment():
         st.caption("Waiting for the first autonomous cycle...")
 
 
-if developer_mode:
+if False:  # Kept dormant until the autonomous workflow is revalidated.
     autonomous_loop_fragment()
