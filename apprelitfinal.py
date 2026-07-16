@@ -209,6 +209,16 @@ if "no_trade_explanation" not in st.session_state:
 if "startup_health" not in st.session_state:
     st.session_state.startup_health = []
 
+# Operator-facing screens deliberately stay free of diagnostics and ad-hoc
+# test panels.  The switch is session scoped so a normal trading session
+# cannot accidentally expose or execute developer-only controls.
+developer_mode = st.sidebar.toggle(
+    "Developer Mode",
+    value=False,
+    key="developer_mode_enabled",
+    help="Shows diagnostics, signal inspection, and strategy registry tools.",
+)
+
 
 # =====================================================
 # HEADER
@@ -490,6 +500,8 @@ NSE_INDEX_SOURCES = {
     "Nifty Next 50": "https://archives.nseindia.com/content/indices/ind_niftynext50list.csv",
 
     "NSE500": "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+    "Nifty100": "https://archives.nseindia.com/content/indices/ind_nifty100list.csv",
+    "Nifty200": "https://archives.nseindia.com/content/indices/ind_niftylargemidcap250list.csv",
 
     "Midcap": "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
 
@@ -560,8 +572,8 @@ def _clean_and_suffix_symbols(base_symbols):
 
 
 SCAN_UNIVERSE_CHOICES = [
-    "NSE All", "NSE500", "Nifty50", "Nifty Next 50",
-    "Midcap", "Smallcap", "Watchlist",
+    "Entire NSE", "Nifty 50", "Nifty 100", "Nifty 200", "Nifty 500",
+    "F&O", "Custom Watchlist",
 ]
 
 
@@ -576,13 +588,26 @@ def get_named_universe(choice):
     user's own session watchlist (managed in the Watchlist panel below).
     """
 
-    if choice == "NSE All":
+    if choice == "Entire NSE":
         return list(ALL_SYMBOLS)
 
-    if choice == "Watchlist":
+    if choice == "Custom Watchlist":
         return _clean_and_suffix_symbols(
             s.replace(".NS", "") for s in st.session_state.watchlist
         )
+
+    # The NSE F&O equity universe is not available as a stable public CSV.
+    # Nifty 200 is the conservative, liquid equity proxy used for the paper
+    # trading scan, rather than silently yielding an empty universe.
+    if choice == "F&O":
+        choice = "Nifty 200"
+
+    choice = {
+        "Nifty 50": "Nifty50",
+        "Nifty 100": "Nifty100",
+        "Nifty 200": "Nifty200",
+        "Nifty 500": "NSE500",
+    }.get(choice, choice)
 
     url = NSE_INDEX_SOURCES.get(choice)
 
@@ -795,317 +820,315 @@ def build_scan_universe(
 
 st.divider()
 
-st.subheader("Scan Manager")
+st.subheader("Mission Control")
 
-st.caption(
-    "Choose exactly what to scan before downloading any data or running "
-    "any strategy - the Scan Manager builds the final symbol list once, "
-    "up front."
-)
+st.caption("Configure the next paper-trading run, then use the single RUN ALPHAQUANT control below.")
 
-if "scan_universe" not in st.session_state:
-    st.session_state.scan_universe = []
+with st.expander("Advanced Scan", expanded=False):
 
-with st.expander("Watchlist"):
+    if "scan_universe" not in st.session_state:
+        st.session_state.scan_universe = []
 
-    watchlist_cols = st.columns([3, 1])
+    with st.expander("Watchlist"):
 
-    new_watch_symbol = watchlist_cols[0].text_input(
-        "Add symbol (e.g. RELIANCE)",
-        key="watchlist_add_input",
-    )
+        watchlist_cols = st.columns([3, 1])
 
-    if watchlist_cols[1].button("Add", key="watchlist_add_button"):
-
-        cleaned = new_watch_symbol.strip().upper().replace(".NS", "")
-
-        if cleaned and cleaned not in st.session_state.watchlist:
-            st.session_state.watchlist.append(cleaned)
-
-    if st.session_state.watchlist:
-
-        st.write(", ".join(st.session_state.watchlist))
-
-        remove_choice = st.selectbox(
-            "Remove from watchlist",
-            ["-"] + st.session_state.watchlist,
-            key="watchlist_remove_select",
+        new_watch_symbol = watchlist_cols[0].text_input(
+            "Add symbol (e.g. RELIANCE)",
+            key="watchlist_add_input",
         )
 
-        if remove_choice != "-" and st.button("Remove", key="watchlist_remove_button"):
-            st.session_state.watchlist.remove(remove_choice)
+        if watchlist_cols[1].button("Add", key="watchlist_add_button"):
+
+            cleaned = new_watch_symbol.strip().upper().replace(".NS", "")
+
+            if cleaned and cleaned not in st.session_state.watchlist:
+                st.session_state.watchlist.append(cleaned)
+
+        if st.session_state.watchlist:
+
+            st.write(", ".join(st.session_state.watchlist))
+
+            remove_choice = st.selectbox(
+                "Remove from watchlist",
+                ["-"] + st.session_state.watchlist,
+                key="watchlist_remove_select",
+            )
+
+            if remove_choice != "-" and st.button("Remove", key="watchlist_remove_button"):
+                st.session_state.watchlist.remove(remove_choice)
+
+        else:
+
+            st.caption("Watchlist is empty.")
+
+    scan_manager_cols = st.columns(2)
+
+    scan_universe_choice = scan_manager_cols[0].selectbox(
+        "Universe",
+        SCAN_UNIVERSE_CHOICES,
+        key="scan_manager_universe_choice",
+    )
+
+    scan_cap_filter = scan_manager_cols[1].selectbox(
+        "Market Cap",
+        ["Any", "Large Cap", "Mid Cap", "Small Cap"],
+        key="scan_manager_cap_filter",
+    )
+
+    scan_price_range = st.slider(
+        "Price Range (Rs)",
+        min_value=0,
+        max_value=20000,
+        value=(20, 20000),
+        key="scan_manager_price_range",
+    )
+
+    scan_min_volume = st.number_input(
+        "Minimum Average Volume (5-day)",
+        min_value=0,
+        value=CONFIG["MIN_AVG_VOLUME"],
+        step=1000,
+        key="scan_manager_min_volume",
+    )
+
+    scan_min_turnover = st.number_input(
+        "Liquidity - Minimum Average Turnover (Rs, 5-day)",
+        min_value=0,
+        value=CONFIG["MIN_AVG_TURNOVER"],
+        step=1000000,
+        key="scan_manager_min_turnover",
+    )
+
+    scan_sector_filter = st.multiselect(
+        "Sector (known-sector map only; leave empty for no sector restriction)",
+        sorted(set(STOCK_SECTOR_MAP.values())),
+        key="scan_manager_sector_filter",
+    )
+
+    scan_style_filter = st.multiselect(
+        "Technical / Patterns (strategy types; leave empty for all)",
+        sorted(SCAN_STYLE_STRATEGY_MAP.keys()),
+        key="scan_manager_style_filter",
+    )
+
+    st.checkbox(
+        "Long Only",
+        value=True,
+        disabled=True,
+        help="AlphaQuant is a long-only platform end-to-end -- there is no "
+             "short-selling logic to disable.",
+    )
+
+    if st.button("Preview Scan List", key="scan_manager_build_button"):
+
+        with st.spinner("Building scan universe..."):
+
+            st.session_state.scan_universe = build_scan_universe(
+                scan_universe_choice,
+                cap_filter=scan_cap_filter,
+                price_range=scan_price_range,
+                min_volume=scan_min_volume,
+                min_turnover=scan_min_turnover,
+                sectors=scan_sector_filter,
+                styles=scan_style_filter,
+            )
+
+            st.session_state.scan_manager_active_styles = scan_style_filter
+
+    if st.session_state.scan_universe:
+
+        st.success(
+            f"Scan list ready: {len(st.session_state.scan_universe)} symbols "
+            f"selected for the next scan."
+        )
+
+        with st.expander("Scan List Preview"):
+            st.dataframe(
+                pd.DataFrame(
+                    {"Symbol": st.session_state.scan_universe}
+                ).head(200)
+            )
 
     else:
 
-        st.caption("Watchlist is empty.")
+        st.info("Build a scan list above before downloading data or running a scan.")
 
-scan_manager_cols = st.columns(2)
+    # =====================================================
+    # PRODUCTION DOWNLOAD MANAGER
+    # VERSION 2.1C
+    # =====================================================
 
-scan_universe_choice = scan_manager_cols[0].selectbox(
-    "Universe",
-    SCAN_UNIVERSE_CHOICES,
-    key="scan_manager_universe_choice",
-)
+    DOWNLOAD_STATUS = st.empty()
 
-scan_cap_filter = scan_manager_cols[1].selectbox(
-    "Market Cap",
-    ["Any", "Large Cap", "Mid Cap", "Small Cap"],
-    key="scan_manager_cap_filter",
-)
-
-scan_price_range = st.slider(
-    "Price Range (Rs)",
-    min_value=0,
-    max_value=20000,
-    value=(20, 20000),
-    key="scan_manager_price_range",
-)
-
-scan_min_volume = st.number_input(
-    "Minimum Average Volume (5-day)",
-    min_value=0,
-    value=CONFIG["MIN_AVG_VOLUME"],
-    step=1000,
-    key="scan_manager_min_volume",
-)
-
-scan_min_turnover = st.number_input(
-    "Liquidity - Minimum Average Turnover (Rs, 5-day)",
-    min_value=0,
-    value=CONFIG["MIN_AVG_TURNOVER"],
-    step=1000000,
-    key="scan_manager_min_turnover",
-)
-
-scan_sector_filter = st.multiselect(
-    "Sector (known-sector map only; leave empty for no sector restriction)",
-    sorted(set(STOCK_SECTOR_MAP.values())),
-    key="scan_manager_sector_filter",
-)
-
-scan_style_filter = st.multiselect(
-    "Style (which strategy types this scan should look for; leave empty for all)",
-    sorted(SCAN_STYLE_STRATEGY_MAP.keys()),
-    key="scan_manager_style_filter",
-)
-
-st.checkbox(
-    "Long Only",
-    value=True,
-    disabled=True,
-    help="AlphaQuant is a long-only platform end-to-end -- there is no "
-         "short-selling logic to disable.",
-)
-
-if st.button("Preview Scan List", key="scan_manager_build_button"):
-
-    with st.spinner("Building scan universe..."):
-
-        st.session_state.scan_universe = build_scan_universe(
-            scan_universe_choice,
-            cap_filter=scan_cap_filter,
-            price_range=scan_price_range,
-            min_volume=scan_min_volume,
-            min_turnover=scan_min_turnover,
-            sectors=scan_sector_filter,
-            styles=scan_style_filter,
-        )
-
-        st.session_state.scan_manager_active_styles = scan_style_filter
-
-if st.session_state.scan_universe:
-
-    st.success(
-        f"Scan list ready: {len(st.session_state.scan_universe)} symbols "
-        f"selected for the next scan."
-    )
-
-    with st.expander("Scan List Preview"):
-        st.dataframe(
-            pd.DataFrame(
-                {"Symbol": st.session_state.scan_universe}
-            ).head(200)
-        )
-
-else:
-
-    st.info("Build a scan list above before downloading data or running a scan.")
-
-# =====================================================
-# PRODUCTION DOWNLOAD MANAGER
-# VERSION 2.1C
-# =====================================================
-
-DOWNLOAD_STATUS = st.empty()
-
-DOWNLOAD_PROGRESS = st.progress(0)
+    DOWNLOAD_PROGRESS = st.progress(0)
 
 
-def split_into_batches(symbols, batch_size):
+    def split_into_batches(symbols, batch_size):
 
-    return [
+        return [
 
-        symbols[i:i + batch_size]
+            symbols[i:i + batch_size]
 
-        for i in range(
+            for i in range(
 
-            0,
+                0,
 
-            len(symbols),
+                len(symbols),
 
-            batch_size
-
-        )
-
-    ]
-
-
-def download_batch(batch):
-
-    """
-    Downloads one batch.
-
-    Returns
-
-    {
-        symbol:dataframe
-    }
-
-    """
-
-    results = {}
-
-    for symbol in batch:
-
-        try:
-
-            df = yf.download(
-
-                symbol,
-
-                period=CONFIG["DOWNLOAD_PERIOD"],
-
-                interval=CONFIG["DOWNLOAD_INTERVAL"],
-
-                progress=False,
-
-                auto_adjust=True,
-
-                threads=False
+                batch_size
 
             )
-
-            # yfinance returns MultiIndex columns (Price, Ticker) even for a
-            # single symbol. Flatten to plain OHLCV column names so every
-            # downstream df["Close"]/df["High"]/etc access returns a Series,
-            # not a nested DataFrame.
-            if isinstance(df.columns, pd.MultiIndex):
-
-                df.columns = df.columns.get_level_values(0)
-
-            # Drop the most recent row if it is still an incomplete/unsettled
-            # session (all price fields NaN), which yfinance can include for
-            # the current trading day.
-            if len(df) and df["Close"].isna().iloc[-1]:
-
-                df = df.iloc[:-1]
-
-            if len(df) > 50:
-
-                results[symbol] = df
-
-        except Exception as e:
-
-            logging.warning(
-
-                f"{symbol} : {e}"
-
-            )
-
-    return results
-
-
-def download_market_data(symbols):
-
-    logging.info(
-
-        "Starting Production Download"
-
-    )
-
-    batches = split_into_batches(
-
-        symbols,
-
-        CONFIG["DOWNLOAD_BATCH"]
-
-    )
-
-    complete = {}
-
-    total = len(batches)
-
-    start = time.time()
-
-    with ThreadPoolExecutor(
-
-        max_workers=CONFIG["MAX_WORKERS"]
-
-    ) as executor:
-
-        futures = [
-
-            executor.submit(
-
-                download_batch,
-
-                batch
-
-            )
-
-            for batch in batches
 
         ]
 
-        for idx, future in enumerate(futures):
 
-            data = future.result()
+    def download_batch(batch):
 
-            complete.update(data)
+        """
+        Downloads one batch.
 
-            DOWNLOAD_PROGRESS.progress(
+        Returns
 
-                (idx + 1) / total
+        {
+            symbol:dataframe
+        }
 
-            )
+        """
 
-            DOWNLOAD_STATUS.write(
+        results = {}
 
-                f"Completed Batch {idx+1} / {total}"
+        for symbol in batch:
 
-            )
+            try:
 
-    elapsed = round(
+                df = yf.download(
 
-        time.time() - start,
+                    symbol,
 
-        2
+                    period=CONFIG["DOWNLOAD_PERIOD"],
 
-    )
+                    interval=CONFIG["DOWNLOAD_INTERVAL"],
 
-    logging.info(
+                    progress=False,
 
-        f"{len(complete)} datasets downloaded"
+                    auto_adjust=True,
 
-    )
+                    threads=False
 
-    st.success(
+                )
 
-        f"{len(complete)} symbols downloaded in {elapsed} sec"
+                # yfinance returns MultiIndex columns (Price, Ticker) even for a
+                # single symbol. Flatten to plain OHLCV column names so every
+                # downstream df["Close"]/df["High"]/etc access returns a Series,
+                # not a nested DataFrame.
+                if isinstance(df.columns, pd.MultiIndex):
 
-    )
+                    df.columns = df.columns.get_level_values(0)
 
-    return complete
+                # Drop the most recent row if it is still an incomplete/unsettled
+                # session (all price fields NaN), which yfinance can include for
+                # the current trading day.
+                if len(df) and df["Close"].isna().iloc[-1]:
+
+                    df = df.iloc[:-1]
+
+                if len(df) > 50:
+
+                    results[symbol] = df
+
+            except Exception as e:
+
+                logging.warning(
+
+                    f"{symbol} : {e}"
+
+                )
+
+        return results
+
+
+    def download_market_data(symbols):
+
+        logging.info(
+
+            "Starting Production Download"
+
+        )
+
+        batches = split_into_batches(
+
+            symbols,
+
+            CONFIG["DOWNLOAD_BATCH"]
+
+        )
+
+        complete = {}
+
+        total = len(batches)
+
+        start = time.time()
+
+        with ThreadPoolExecutor(
+
+            max_workers=CONFIG["MAX_WORKERS"]
+
+        ) as executor:
+
+            futures = [
+
+                executor.submit(
+
+                    download_batch,
+
+                    batch
+
+                )
+
+                for batch in batches
+
+            ]
+
+            for idx, future in enumerate(futures):
+
+                data = future.result()
+
+                complete.update(data)
+
+                DOWNLOAD_PROGRESS.progress(
+
+                    (idx + 1) / total
+
+                )
+
+                DOWNLOAD_STATUS.write(
+
+                    f"Completed Batch {idx+1} / {total}"
+
+                )
+
+        elapsed = round(
+
+            time.time() - start,
+
+            2
+
+        )
+
+        logging.info(
+
+            f"{len(complete)} datasets downloaded"
+
+        )
+
+        st.success(
+
+            f"{len(complete)} symbols downloaded in {elapsed} sec"
+
+        )
+
+        return complete
 
 
 # =====================================================
@@ -2199,31 +2222,33 @@ def get_trade_candidates():
 # PREVIEW PANEL
 # =====================================================
 
-st.divider()
+if developer_mode:
 
-st.subheader("Trade Candidate Engine")
+    st.divider()
 
-if st.button("Show Trade Candidates"):
+    st.subheader("Developer Mode · Trade Candidate Diagnostics")
 
-    df=get_trade_candidates()
+    if st.button("Show Trade Candidates"):
 
-    if len(df)==0:
+        df=get_trade_candidates()
 
-        st.info(
+        if len(df)==0:
 
-            "No Trade Candidates Yet"
+            st.info(
 
-        )
+                "No Trade Candidates Yet"
 
-    else:
+            )
 
-        st.dataframe(
+        else:
 
-            df,
+            st.dataframe(
 
-            use_container_width=True
+                df,
 
-        )
+                use_container_width=True
+
+            )
 # =====================================================
 # BATCH 1 - ADVANCED SIGNALS PANEL
 # =====================================================
@@ -2257,29 +2282,30 @@ def get_batch1_signals_dataframe():
     return pd.DataFrame(rows)
 
 
-st.divider()
+if developer_mode:
+    st.divider()
 
-st.subheader("Batch 1 - Advanced Signals")
+    st.subheader("Developer Mode · Batch 1 Signals")
 
-st.caption(
+    st.caption(
     "Multi-Timeframe Alignment, Relative Strength vs NIFTY, Sector Ranking, "
     "Volume Profile and Demand/Supply Zones - feeding into AI Consensus."
 )
 
-if st.button("Show Advanced Signals"):
+    if st.button("Show Advanced Signals"):
 
-    signals_df = get_batch1_signals_dataframe()
+        signals_df = get_batch1_signals_dataframe()
 
-    if len(signals_df) == 0:
+        if len(signals_df) == 0:
 
-        st.info("No Signals Yet - Run a Scan First")
+            st.info("No Signals Yet - Run a Scan First")
 
-    else:
+        else:
 
-        st.dataframe(
-            signals_df,
-            use_container_width=True
-        )
+            st.dataframe(
+                signals_df,
+                use_container_width=True
+            )
 
 
 def get_batch2_signals_dataframe():
@@ -2316,31 +2342,32 @@ def get_batch2_signals_dataframe():
     return pd.DataFrame(rows)
 
 
-st.divider()
+if developer_mode:
+    st.divider()
 
-st.subheader("Batch 2 - False Breakout, Smart Money, Institutional & News/Earnings")
+    st.subheader("Developer Mode · Batch 2 Signals")
 
-st.caption(
+    st.caption(
     "False Breakout Detection, Smart Money Concepts (BOS/CHOCH/Order Blocks/"
     "Liquidity Sweeps/FVG), Institutional Activity (volume-based proxy - "
     "NSE delivery % is not available from this data source), and the News/"
     "Earnings Filter - combined into the AI Confidence Engine feeding AI Consensus."
     )
 
-if st.button("Show Batch 2 Signals"):
+    if st.button("Show Batch 2 Signals"):
 
-    b2_df = get_batch2_signals_dataframe()
+        b2_df = get_batch2_signals_dataframe()
 
-    if len(b2_df) == 0:
+        if len(b2_df) == 0:
 
-        st.info("No Signals Yet - Run a Scan First")
+            st.info("No Signals Yet - Run a Scan First")
 
-    else:
+        else:
 
-        st.dataframe(
-            b2_df,
-            use_container_width=True
-        )
+            st.dataframe(
+                b2_df,
+                use_container_width=True
+            )
 # =====================================================
 # PRICE SQUEEZE ENGINE - PART 1
 # VERSION 3.1A
@@ -3771,11 +3798,10 @@ def show_registered_strategies():
 # Strategy Dashboard
 # ==========================================
 
-st.divider()
-
-st.subheader("Strategy Registry")
-
-show_registered_strategies()
+if developer_mode:
+    st.divider()
+    st.subheader("Developer Mode · Strategy Registry")
+    show_registered_strategies()
 # =====================================================
 # DEMAND & SUPPLY ENGINE
 # PART 1
@@ -4838,12 +4864,13 @@ def execute_scan_pipeline():
         PipelineStep("Market Observer", initialize_stage, "Preparing market context"),
         PipelineStep("Market Historian", lambda: "Regime catalog/context available", "Historian ready"),
         PipelineStep("Trade Candidate Engine", scan_stage, "Running indicators, Batch 1, Batch 2 and strategies"),
-        PipelineStep("Historical Analog Engine", consensus_stage, "Strategist, analog evidence, risk and consensus"),
-        PipelineStep("Strategist", lambda: "Strategist evidence included in consensus", "Completed"),
-        PipelineStep("Risk Manager", lambda: "Risk verdicts captured", "Completed"),
+        PipelineStep("Market Structure", lambda: "Market structure evaluated during candidate generation", "Completed"),
+        PipelineStep("Historical Analog", lambda: "Historical analog evidence is ready for consensus", "Completed"),
+        PipelineStep("Strategist", lambda: "Strategist evidence is ready for consensus", "Completed"),
+        PipelineStep("Risk Manager", lambda: "Risk verdicts are applied during consensus", "Completed"),
+        PipelineStep("AI Consensus", consensus_stage, "Building consensus and applying risk evidence"),
         PipelineStep("Portfolio Manager", portfolio_stage, "Allocating approved trades"),
-        PipelineStep("AI Consensus", lambda: "Consensus ranking refreshed", "Completed"),
-        PipelineStep("Paper Trading Engine", paper_stage, "Opening/monitoring paper trades"),
+        PipelineStep("Paper Trading", paper_stage, "Opening/monitoring paper trades"),
         PipelineStep("Reviewer", reviewer_memory_stage, "Recording learning updates"),
         PipelineStep("Experience Memory", lambda: "Decision memory synchronized", "Completed"),
         PipelineStep("Dashboard Refresh", lambda: "Mission Control refreshed", "Completed"),
@@ -8633,7 +8660,7 @@ def show_alphaquant_os_panel():
 
 def show_mission_control():
     st.divider()
-    st.header("Mission Control")
+    st.header("Execution Status")
 
     if st.session_state.get("last_cycle_time"):
         st.caption(
