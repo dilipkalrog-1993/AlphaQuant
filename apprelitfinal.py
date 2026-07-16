@@ -220,47 +220,9 @@ developer_mode = st.sidebar.toggle(
 )
 
 
-# =====================================================
-# HEADER
-# =====================================================
-
-st.title("📈 AlphaQuant Professional")
-
-st.caption(
-    "AI Assisted Long Only Trading Platform"
-)
-
-# =====================================================
-# DASHBOARD
-# =====================================================
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-    "Version",
-    CONFIG["VERSION"]
-)
-
-c2.metric(
-    "Scan Mode",
-    "Entire NSE"
-)
-
-c3.metric(
-    "Strategy",
-    "Long Only"
-)
-
-c4.metric(
-    "Status",
-    "Ready"
-)
-
-st.divider()
-
-st.info(
-    "Phase 2.1 - Foundation Loaded Successfully"
-)
+# The operator workspace is intentionally rendered once, at the end of this
+# file.  Keeping this bootstrap area presentation-free prevents legacy cards
+# from appearing before Mission Control.
 
 
 # =====================================================
@@ -315,7 +277,8 @@ def show_startup_health_check():
         else:
             st.success("All startup checks passed.")
 
-show_startup_health_check()
+# Startup checks are available in Developer Mode only (rendered in its
+# Diagnostics tab below).
 # =====================================================
 # UNIVERSE ENGINE
 # VERSION 2.1B
@@ -452,27 +415,28 @@ def fetch_complete_nse_universe():
 
 ALL_SYMBOLS = fetch_complete_nse_universe()
 
-st.success(
+if developer_mode:
+    st.success(
 
-    f"Universe Loaded : {len(ALL_SYMBOLS)} Stocks"
-
-)
-
-with st.expander("Universe Preview"):
-
-    st.dataframe(
-
-        pd.DataFrame(
-
-            {
-
-                "Symbol": ALL_SYMBOLS
-
-            }
-
-        ).head(100)
+        f"Universe Loaded : {len(ALL_SYMBOLS)} Stocks"
 
     )
+
+    with st.expander("Universe Preview"):
+
+        st.dataframe(
+
+            pd.DataFrame(
+
+                {
+
+                    "Symbol": ALL_SYMBOLS
+
+                }
+
+            ).head(100)
+
+        )
 
 # =====================================================
 # SCAN MANAGER
@@ -818,141 +782,149 @@ def build_scan_universe(
 # SCAN MANAGER UI
 # =====================================================
 
-st.divider()
+if developer_mode:
+    st.divider()
+    st.subheader("Developer Mode · Scan Configuration")
 
-st.subheader("Mission Control")
+# Operator defaults keep the one-button workflow functional without exposing tuning controls.
+scan_universe_choice = st.session_state.get("scan_manager_universe_choice", SCAN_UNIVERSE_CHOICES[0])
+scan_cap_filter = st.session_state.get("scan_manager_cap_filter", "Any")
+scan_price_range = st.session_state.get("scan_manager_price_range", (20, 20000))
+scan_min_volume = st.session_state.get("scan_manager_min_volume", CONFIG["MIN_AVG_VOLUME"])
+scan_min_turnover = st.session_state.get("scan_manager_min_turnover", CONFIG["MIN_AVG_TURNOVER"])
+scan_sector_filter = st.session_state.get("scan_manager_sector_filter", [])
+scan_style_filter = st.session_state.get("scan_manager_style_filter", [])
 
-st.caption("Configure the next paper-trading run, then use the single RUN ALPHAQUANT control below.")
+if developer_mode:
+    with st.expander("Advanced Scan", expanded=False):
 
-with st.expander("Advanced Scan", expanded=False):
+        if "scan_universe" not in st.session_state:
+            st.session_state.scan_universe = []
 
-    if "scan_universe" not in st.session_state:
-        st.session_state.scan_universe = []
+        with st.expander("Watchlist"):
 
-    with st.expander("Watchlist"):
+            watchlist_cols = st.columns([3, 1])
 
-        watchlist_cols = st.columns([3, 1])
+            new_watch_symbol = watchlist_cols[0].text_input(
+                "Add symbol (e.g. RELIANCE)",
+                key="watchlist_add_input",
+            )
 
-        new_watch_symbol = watchlist_cols[0].text_input(
-            "Add symbol (e.g. RELIANCE)",
-            key="watchlist_add_input",
+            if watchlist_cols[1].button("Add", key="watchlist_add_button"):
+
+                cleaned = new_watch_symbol.strip().upper().replace(".NS", "")
+
+                if cleaned and cleaned not in st.session_state.watchlist:
+                    st.session_state.watchlist.append(cleaned)
+
+            if st.session_state.watchlist:
+
+                st.write(", ".join(st.session_state.watchlist))
+
+                remove_choice = st.selectbox(
+                    "Remove from watchlist",
+                    ["-"] + st.session_state.watchlist,
+                    key="watchlist_remove_select",
+                )
+
+                if remove_choice != "-" and st.button("Remove", key="watchlist_remove_button"):
+                    st.session_state.watchlist.remove(remove_choice)
+
+            else:
+
+                st.caption("Watchlist is empty.")
+
+        scan_manager_cols = st.columns(2)
+
+        scan_universe_choice = scan_manager_cols[0].selectbox(
+            "Universe",
+            SCAN_UNIVERSE_CHOICES,
+            key="scan_manager_universe_choice",
         )
 
-        if watchlist_cols[1].button("Add", key="watchlist_add_button"):
-
-            cleaned = new_watch_symbol.strip().upper().replace(".NS", "")
-
-            if cleaned and cleaned not in st.session_state.watchlist:
-                st.session_state.watchlist.append(cleaned)
-
-        if st.session_state.watchlist:
-
-            st.write(", ".join(st.session_state.watchlist))
-
-            remove_choice = st.selectbox(
-                "Remove from watchlist",
-                ["-"] + st.session_state.watchlist,
-                key="watchlist_remove_select",
-            )
-
-            if remove_choice != "-" and st.button("Remove", key="watchlist_remove_button"):
-                st.session_state.watchlist.remove(remove_choice)
-
-        else:
-
-            st.caption("Watchlist is empty.")
-
-    scan_manager_cols = st.columns(2)
-
-    scan_universe_choice = scan_manager_cols[0].selectbox(
-        "Universe",
-        SCAN_UNIVERSE_CHOICES,
-        key="scan_manager_universe_choice",
-    )
-
-    scan_cap_filter = scan_manager_cols[1].selectbox(
-        "Market Cap",
-        ["Any", "Large Cap", "Mid Cap", "Small Cap"],
-        key="scan_manager_cap_filter",
-    )
-
-    scan_price_range = st.slider(
-        "Price Range (Rs)",
-        min_value=0,
-        max_value=20000,
-        value=(20, 20000),
-        key="scan_manager_price_range",
-    )
-
-    scan_min_volume = st.number_input(
-        "Minimum Average Volume (5-day)",
-        min_value=0,
-        value=CONFIG["MIN_AVG_VOLUME"],
-        step=1000,
-        key="scan_manager_min_volume",
-    )
-
-    scan_min_turnover = st.number_input(
-        "Liquidity - Minimum Average Turnover (Rs, 5-day)",
-        min_value=0,
-        value=CONFIG["MIN_AVG_TURNOVER"],
-        step=1000000,
-        key="scan_manager_min_turnover",
-    )
-
-    scan_sector_filter = st.multiselect(
-        "Sector (known-sector map only; leave empty for no sector restriction)",
-        sorted(set(STOCK_SECTOR_MAP.values())),
-        key="scan_manager_sector_filter",
-    )
-
-    scan_style_filter = st.multiselect(
-        "Technical / Patterns (strategy types; leave empty for all)",
-        sorted(SCAN_STYLE_STRATEGY_MAP.keys()),
-        key="scan_manager_style_filter",
-    )
-
-    st.checkbox(
-        "Long Only",
-        value=True,
-        disabled=True,
-        help="AlphaQuant is a long-only platform end-to-end -- there is no "
-             "short-selling logic to disable.",
-    )
-
-    if st.button("Preview Scan List", key="scan_manager_build_button"):
-
-        with st.spinner("Building scan universe..."):
-
-            st.session_state.scan_universe = build_scan_universe(
-                scan_universe_choice,
-                cap_filter=scan_cap_filter,
-                price_range=scan_price_range,
-                min_volume=scan_min_volume,
-                min_turnover=scan_min_turnover,
-                sectors=scan_sector_filter,
-                styles=scan_style_filter,
-            )
-
-            st.session_state.scan_manager_active_styles = scan_style_filter
-
-    if st.session_state.scan_universe:
-
-        st.success(
-            f"Scan list ready: {len(st.session_state.scan_universe)} symbols "
-            f"selected for the next scan."
+        scan_cap_filter = scan_manager_cols[1].selectbox(
+            "Market Cap",
+            ["Any", "Large Cap", "Mid Cap", "Small Cap"],
+            key="scan_manager_cap_filter",
         )
 
-        with st.expander("Scan List Preview"):
-            st.dataframe(
-                pd.DataFrame(
-                    {"Symbol": st.session_state.scan_universe}
-                ).head(200)
+        scan_price_range = st.slider(
+            "Price Range (Rs)",
+            min_value=0,
+            max_value=20000,
+            value=(20, 20000),
+            key="scan_manager_price_range",
+        )
+
+        scan_min_volume = st.number_input(
+            "Minimum Average Volume (5-day)",
+            min_value=0,
+            value=CONFIG["MIN_AVG_VOLUME"],
+            step=1000,
+            key="scan_manager_min_volume",
+        )
+
+        scan_min_turnover = st.number_input(
+            "Liquidity - Minimum Average Turnover (Rs, 5-day)",
+            min_value=0,
+            value=CONFIG["MIN_AVG_TURNOVER"],
+            step=1000000,
+            key="scan_manager_min_turnover",
+        )
+
+        scan_sector_filter = st.multiselect(
+            "Sector (known-sector map only; leave empty for no sector restriction)",
+            sorted(set(STOCK_SECTOR_MAP.values())),
+            key="scan_manager_sector_filter",
+        )
+
+        scan_style_filter = st.multiselect(
+            "Technical / Patterns (strategy types; leave empty for all)",
+            sorted(SCAN_STYLE_STRATEGY_MAP.keys()),
+            key="scan_manager_style_filter",
+        )
+
+        st.checkbox(
+            "Long Only",
+            value=True,
+            disabled=True,
+            help="AlphaQuant is a long-only platform end-to-end -- there is no "
+                 "short-selling logic to disable.",
+        )
+
+        if developer_mode and st.button("Preview Scan List", key="scan_manager_build_button"):
+
+            with st.spinner("Building scan universe..."):
+
+                st.session_state.scan_universe = build_scan_universe(
+                    scan_universe_choice,
+                    cap_filter=scan_cap_filter,
+                    price_range=scan_price_range,
+                    min_volume=scan_min_volume,
+                    min_turnover=scan_min_turnover,
+                    sectors=scan_sector_filter,
+                    styles=scan_style_filter,
+                )
+
+                st.session_state.scan_manager_active_styles = scan_style_filter
+
+        if developer_mode and st.session_state.scan_universe:
+
+            st.success(
+                f"Scan list ready: {len(st.session_state.scan_universe)} symbols "
+                f"selected for the next scan."
             )
 
-    else:
+            with st.expander("Scan List Preview"):
+                st.dataframe(
+                    pd.DataFrame(
+                        {"Symbol": st.session_state.scan_universe}
+                    ).head(200)
+                )
 
-        st.info("Build a scan list above before downloading data or running a scan.")
+        elif developer_mode:
+
+            st.info("Build a scan list above before downloading data or running a scan.")
 
     # =====================================================
     # PRODUCTION DOWNLOAD MANAGER
@@ -1135,39 +1107,32 @@ with st.expander("Advanced Scan", expanded=False):
 # MARKET DATA ENGINE STATUS
 # =====================================================
 
-st.divider()
-
-st.subheader("Market Data Engine")
-
-st.caption("Market data downloads automatically when RUN ALPHAQUANT is pressed.")
-
-if st.session_state.market_data:
-
-    st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
-
-else:
-
-    st.info("No market data loaded yet. Press RUN ALPHAQUANT to build the universe and download data automatically.")
+if developer_mode:
+    st.subheader("Developer Mode · Market Data")
+    if st.session_state.market_data:
+        st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
+    else:
+        st.info("No market data loaded yet.")
 # =====================================================
 # CONFIGURATION SIDEBAR
 # VERSION 2.1D
 # =====================================================
 
-st.sidebar.title("⚙ AlphaQuant Settings")
-
-CONFIG["DOWNLOAD_PERIOD"] = st.sidebar.selectbox(
+if developer_mode:
+  with st.expander("Advanced Scan Settings", expanded=False):
+    CONFIG["DOWNLOAD_PERIOD"] = st.selectbox(
     "History",
     ["6mo", "1y", "2y", "5y"],
     index=1
 )
 
-CONFIG["DOWNLOAD_INTERVAL"] = st.sidebar.selectbox(
+    CONFIG["DOWNLOAD_INTERVAL"] = st.selectbox(
     "Interval",
     ["1d", "1wk"],
     index=0
 )
 
-CONFIG["DOWNLOAD_BATCH"] = st.sidebar.slider(
+    CONFIG["DOWNLOAD_BATCH"] = st.slider(
     "Batch Size",
     min_value=10,
     max_value=100,
@@ -1175,36 +1140,33 @@ CONFIG["DOWNLOAD_BATCH"] = st.sidebar.slider(
     step=10
 )
 
-CONFIG["MAX_WORKERS"] = st.sidebar.slider(
+    CONFIG["MAX_WORKERS"] = st.slider(
     "Parallel Workers",
     min_value=2,
     max_value=16,
     value=CONFIG["MAX_WORKERS"]
 )
 
-CONFIG["MIN_PRICE"] = st.sidebar.number_input(
+    CONFIG["MIN_PRICE"] = st.number_input(
     "Minimum Stock Price (₹)",
     min_value=1,
     value=CONFIG["MIN_PRICE"]
 )
 
-CONFIG["MIN_AVG_VOLUME"] = st.sidebar.number_input(
+    CONFIG["MIN_AVG_VOLUME"] = st.number_input(
     "Minimum Average Daily Volume",
     min_value=1000,
     value=CONFIG["MIN_AVG_VOLUME"],
     step=1000
 )
 
-CONFIG["MAX_OPEN_POSITIONS"] = st.sidebar.slider(
+    CONFIG["MAX_OPEN_POSITIONS"] = st.slider(
     "Maximum Open Positions",
     min_value=1,
     max_value=20,
     value=CONFIG["MAX_OPEN_POSITIONS"]
 )
 
-st.sidebar.markdown("---")
-
-st.sidebar.success("Configuration Loaded")
 # =====================================================
 # INDICATOR ENGINE
 # VERSION 2.2A
@@ -1576,7 +1538,6 @@ def get_stock(symbol):
     return st.session_state.stock_objects[symbol]
 
 
-st.sidebar.success("Stock Intelligence Engine Loaded")
 # =====================================================
 # TRADE QUALITY ENGINE
 # VERSION 2.2C
@@ -2222,7 +2183,7 @@ def get_trade_candidates():
 # PREVIEW PANEL
 # =====================================================
 
-if developer_mode:
+if False:  # Rendered in the Developer Mode workspace tabs.
 
     st.divider()
 
@@ -2282,7 +2243,7 @@ def get_batch1_signals_dataframe():
     return pd.DataFrame(rows)
 
 
-if developer_mode:
+if False:  # Rendered in the Developer Mode workspace tabs.
     st.divider()
 
     st.subheader("Developer Mode · Batch 1 Signals")
@@ -2342,7 +2303,7 @@ def get_batch2_signals_dataframe():
     return pd.DataFrame(rows)
 
 
-if developer_mode:
+if False:  # Rendered in the Developer Mode workspace tabs.
     st.divider()
 
     st.subheader("Developer Mode · Batch 2 Signals")
@@ -3223,11 +3184,6 @@ def legacy_run_complete_scan():
 # SCAN BUTTON
 # =====================================================
 
-st.divider()
-
-st.subheader("AlphaQuant Scanner")
-
-
 def _pipeline_event(event):
     st.session_state.pipeline_events.append({
         "Time": event.timestamp.strftime("%H:%M:%S"),
@@ -3287,15 +3243,6 @@ def run_automated_cycle(trigger="AUTONOMOUS"):
     """Autonomous loop compatibility wrapper around the one-button workflow."""
     return run_alphaquant(trigger=trigger)
 
-
-if st.button("RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary"):
-
-    ok, msg = run_alphaquant(trigger="MANUAL")
-
-    if ok:
-        st.success(msg)
-    else:
-        st.warning(msg)
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -3659,19 +3606,14 @@ def show_trade_history():
         st.info("No Closed Trades")
 
 
-st.divider()
-
-st.subheader("Paper Trading Dashboard")
-
-paper_portfolio_summary()
-
-with st.expander("Open Positions", expanded=True):
-
-    show_open_positions()
-
-with st.expander("Trade History"):
-
-    show_trade_history()
+if developer_mode:
+    st.divider()
+    st.subheader("Developer Mode · Paper Trading")
+    paper_portfolio_summary()
+    with st.expander("Open Positions", expanded=True):
+        show_open_positions()
+    with st.expander("Trade History"):
+        show_trade_history()
 # =====================================================
 # STRATEGY REGISTRY
 # VERSION 3.3A
@@ -3798,7 +3740,7 @@ def show_registered_strategies():
 # Strategy Dashboard
 # ==========================================
 
-if developer_mode:
+if False:  # Rendered in the Developer Mode workspace tabs.
     st.divider()
     st.subheader("Developer Mode · Strategy Registry")
     show_registered_strategies()
@@ -8732,19 +8674,126 @@ def show_mission_control():
             st.caption("No allocated portfolio positions from the latest run.")
 
 
-show_mission_control()
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = (9, 15)
+MARKET_CLOSE = (15, 30)
 
-show_market_dashboard()
 
-show_ai_summary()
+def _operator_market_open(now):
+    if now.weekday() >= 5:
+        return False
+    return (now.hour, now.minute) >= MARKET_OPEN and (now.hour, now.minute) <= MARKET_CLOSE
 
-show_portfolio_summary()
 
-show_live_positions()
+def show_execution_timeline():
+    """Single operator-safe view of pipeline progress, without diagnostics."""
+    stages = ["Universe", "Market Data", "Observer", "Structure", "Analog",
+              "Strategy", "Risk", "Consensus", "Portfolio", "Paper Trading", "Learning"]
+    completed = {str(name).lower() for name, status in st.session_state.get("brain_status", {}).items()
+                 if str(status).upper() in {"SUCCESS", "COMPLETE", "COMPLETED", "OK"}}
+    labels = []
+    for stage in stages:
+        matched = any(word in stage.lower() or stage.lower() in word for word in completed)
+        labels.append(f"{'✓' if matched else '○'} {stage}")
+    st.caption("  •  ".join(labels))
 
-show_portfolio_dashboard()
 
-show_alphaquant_os_panel()
+def show_operator_workspace():
+    """The sole normal-trader dashboard: concise, operational, and non-technical."""
+    now_ist = datetime.now(IST)
+    open_now = _operator_market_open(now_ist)
+    stats = portfolio_statistics()
+    positions = list(st.session_state.paper_positions.values())
+    total_value = sum(getattr(p, "current_price", 0) * getattr(p, "remaining_qty", 0) for p in positions)
+    confidence = max([getattr(t, "ai_confidence", 0) or 0 for t in st.session_state.final_trade_list] or [0])
+
+    st.title("AlphaQuant")
+    st.caption("Institutional intelligence for paper-trading decisions")
+    top = st.columns(8)
+    top[0].metric("Market Status", "OPEN" if open_now else "CLOSED")
+    top[1].metric("NIFTY", "—")
+    top[2].metric("BANKNIFTY", "—")
+    top[3].metric("VIX", "—")
+    top[4].metric("Market Sentiment", "Monitoring")
+    top[5].metric("Portfolio Value", f"₹{total_value:,.0f}")
+    top[6].metric("Today's P&L", f"₹{stats['OpenPnL'] + stats['ClosedPnL']:,.2f}")
+    top[7].metric("AI Confidence", f"{confidence:.0f}%" if confidence else "—")
+
+    st.subheader("Mission Control")
+    status, universe, filters = st.columns(3)
+    status.metric("Current Time", now_ist.strftime("%H:%M IST"))
+    universe.metric("Selected Universe", scan_universe_choice)
+    filters.metric("Filters Summary", f"{scan_cap_filter} · {len(scan_sector_filter) or 'All'} sectors")
+    if st.button("RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary", use_container_width=True):
+        ok, msg = run_alphaquant(trigger="MANUAL")
+        (st.success if ok else st.warning)(msg)
+    show_execution_timeline()
+
+    second = st.columns(3)
+    with second[0]:
+        show_ai_summary()
+    with second[1]:
+        st.subheader("Open Positions")
+        if positions:
+            st.dataframe(pd.DataFrame([{"Symbol": p.symbol, "Qty": p.remaining_qty, "P&L": round(p.unrealized_pnl, 2)} for p in positions]), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No open positions.")
+    with second[2]:
+        st.subheader("Recent Activity")
+        st.caption(st.session_state.get("last_cycle_message") or "No activity recorded.")
+
+    third = st.columns(3)
+    with third[0]:
+        st.subheader("Portfolio Allocation")
+        st.caption(f"{len(st.session_state.selected_portfolio)} allocated positions")
+    with third[1]:
+        st.subheader("Risk")
+        st.caption(f"{len(positions)} open of {CONFIG['MAX_OPEN_POSITIONS']} maximum positions")
+    with third[2]:
+        st.subheader("Sector Exposure")
+        st.caption("Available after allocation.")
+
+    fourth = st.columns(3)
+    with fourth[0]:
+        st.subheader("News")
+        st.caption("News intelligence is coming soon.")
+    with fourth[1]:
+        st.subheader("Performance")
+        st.caption(f"Win rate: {stats['WinRate']}%")
+    with fourth[2]:
+        st.subheader("Watchlist")
+        st.caption(", ".join(st.session_state.watchlist) or "No symbols in watchlist.")
+
+
+def show_developer_workspace():
+    """All technical tooling is isolated here and never leaks into operator UI."""
+    st.divider()
+    st.header("Developer Mode")
+    pipeline, diagnostics, market_data, signals, strategies, database, logs, testing = st.tabs(
+        ["Pipeline", "Diagnostics", "Market Data", "Signals", "Strategies", "Database", "Logs", "Testing"])
+    with pipeline:
+        show_mission_control()
+    with diagnostics:
+        show_startup_health_check()
+        st.dataframe(get_trade_candidates(), use_container_width=True)
+    with market_data:
+        st.write(f"Loaded datasets: {len(st.session_state.market_data)}")
+    with signals:
+        st.dataframe(get_batch1_signals_dataframe(), use_container_width=True)
+        st.dataframe(get_batch2_signals_dataframe(), use_container_width=True)
+    with strategies:
+        show_registered_strategies()
+    with database:
+        show_alphaquant_os_panel()
+    with logs:
+        st.caption("Technical logs are written to logs/alphaquant.log.")
+    with testing:
+        st.caption("Startup health checks and pipeline diagnostics are available in the tabs above.")
+
+
+show_operator_workspace()
+if developer_mode:
+    show_developer_workspace()
 
 if st.session_state.run_complete_scan_requested:
 
@@ -8858,48 +8907,49 @@ def quick_refresh_open_positions():
             remove_open_position(symbol)
 
 
-st.divider()
+if developer_mode:
+    st.divider()
 
-st.subheader("Autonomous Trading Loop")
+    st.subheader("Autonomous Trading Loop")
 
-st.caption(
-    "Runs the Scan Manager's chosen universe through the full pipeline "
-    "and monitors open positions on its own while the market is open and "
-    "this tab stays connected. It reuses run_automated_cycle() - the same "
-    "code path 'RUN ALPHAQUANT' uses - so there is one pipeline, "
-    "triggered manually or automatically."
-)
+    st.caption(
+        "Runs the Scan Manager's chosen universe through the full pipeline "
+        "and monitors open positions on its own while the market is open and "
+        "this tab stays connected. It reuses run_automated_cycle() - the same "
+        "code path 'RUN ALPHAQUANT' uses - so there is one pipeline, "
+        "triggered manually or automatically."
+    )
 
-col_auto_a, col_auto_b = st.columns(2)
+    col_auto_a, col_auto_b = st.columns(2)
 
-with col_auto_a:
+    with col_auto_a:
 
-    if not st.session_state.autonomous_active:
+        if not st.session_state.autonomous_active:
 
-        if st.button("Start Autonomous Mode"):
+            if st.button("Start Autonomous Mode"):
 
-            if not st.session_state.scan_universe:
-                st.warning(
-                    "Build a scan list in Scan Manager above before "
-                    "starting autonomous mode."
-                )
-            else:
-                st.session_state.autonomous_active = True
+                if not st.session_state.scan_universe:
+                    st.warning(
+                        "Build a scan list in Scan Manager above before "
+                        "starting autonomous mode."
+                    )
+                else:
+                    st.session_state.autonomous_active = True
+                    st.rerun()
+
+        else:
+
+            if st.button("Stop Autonomous Mode"):
+
+                st.session_state.autonomous_active = False
                 st.rerun()
 
-    else:
+    with col_auto_b:
 
-        if st.button("Stop Autonomous Mode"):
-
-            st.session_state.autonomous_active = False
-            st.rerun()
-
-with col_auto_b:
-
-    st.metric(
-        "Autonomous Mode",
-        "RUNNING" if st.session_state.autonomous_active else "STOPPED",
-    )
+        st.metric(
+            "Autonomous Mode",
+            "RUNNING" if st.session_state.autonomous_active else "STOPPED",
+        )
 
 
 @st.fragment(run_every=MONITOR_INTERVAL_SECONDS)
@@ -8966,4 +9016,5 @@ def autonomous_loop_fragment():
         st.caption("Waiting for the first autonomous cycle...")
 
 
-autonomous_loop_fragment()
+if developer_mode:
+    autonomous_loop_fragment()
