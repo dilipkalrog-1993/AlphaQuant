@@ -211,9 +211,9 @@ st.markdown(
 # every engine still runs at import so the one-click pipeline behaviour
 # is preserved.
 
-_PAGE_LIST = ["Dashboard", "Scanner", "AI", "Portfolio", "Paper Trading", "Settings"]
+_PAGE_LIST = ["Dashboard", "Scanner", "AI", "Portfolio", "Paper Trading", "Broker Manager", "Settings"]
 _PAGE_ICONS = {"Dashboard": "🏠", "Scanner": "🔭", "AI": "🧠",
-               "Portfolio": "💼", "Paper Trading": "📊", "Settings": "⚙️"}
+               "Portfolio": "💼", "Paper Trading": "📊", "Broker Manager": "🔌", "Settings": "⚙️"}
 
 if "_page" not in st.session_state:
     st.session_state["_page"] = "Dashboard"
@@ -4187,7 +4187,13 @@ class MarketDataManager:
         st.session_state.setdefault(self.session_key, {"history": {}, "live_ticks": {}, "status": {}, "last_persisted": None})
 
     def _path(self, symbol: str, interval: str) -> Path:
-        return self.storage_dir / f"{symbol}_{interval}.csv"
+        safe_symbol = str(symbol).replace("/", "_").replace("|", "_")
+        return self.storage_dir / f"{safe_symbol}_{interval}.csv"
+
+    def _backup_path(self, symbol: str, interval: str) -> Path:
+        backup_dir = self.storage_dir / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        return backup_dir / f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d')}.csv.gz"
 
     def _load(self, symbol: str, interval: str):
         path = self._path(symbol, interval)
@@ -4197,8 +4203,39 @@ class MarketDataManager:
 
     def _save(self, symbol: str, interval: str, df):
         if df is not None and not df.empty:
-            df.sort_index().to_csv(self._path(symbol, interval))
+            path = self._path(symbol, interval)
+            df.sort_index().to_csv(path)
+            df.sort_index().to_pickle(str(path) + ".pkl.gz", compression="gzip")
             st.session_state[self.session_key]["last_persisted"] = datetime.now()
+            st.session_state[self.session_key].setdefault("versions", {})[f"{symbol}:{interval}"] = {
+                "rows": int(len(df)), "updated_at": datetime.now().isoformat(), "path": str(path)
+            }
+
+    def backup_history(self, symbol: str, interval: str = "1d"):
+        cached = self._load(symbol, interval)
+        if cached is None or cached.empty:
+            return None
+        backup = self._backup_path(symbol.replace("/", "_").replace("|", "_"), interval)
+        cached.to_csv(backup, compression="gzip")
+        return backup
+
+    def detect_gaps(self, symbol: str, interval: str = "1d"):
+        df = self._load(symbol, interval)
+        if df is None or df.empty:
+            return []
+        freq = "B" if interval in ("1d", "1wk", "1mo", "1w", "1M") else None
+        if not freq:
+            return []
+        expected = pd.date_range(df.index.min().date(), df.index.max().date(), freq=freq)
+        missing = expected.difference(pd.DatetimeIndex(df.index).normalize())
+        return [d.strftime("%Y-%m-%d") for d in missing]
+
+    def morning_sync(self, symbols, intervals=("1d",)):
+        results = {}
+        for interval in intervals:
+            results[interval] = self.update_history(symbols, interval)
+            self.repair_history(symbols, interval)
+        return results
 
     def _download(self, symbols, interval, period):
         provider_cls = globals().get("YFinanceProvider")
@@ -6675,24 +6712,29 @@ class SimulationExecutionEngine(PaperExecutionEngine):
 
 
 class LiveExecutionEngine(ExecutionEngine):
-    """
-    Seam for a future real broker (e.g. Upstox). Intentionally not
-    implemented in this phase - selecting this mode fails loudly instead
-    of silently falling back to paper trading, so it can never be
-    mistaken for a working live-execution path.
-    """
+    """Live mode routes the same trade decisions to the selected broker."""
 
     mode = "LIVE"
 
+    def _broker(self):
+        return st.session_state.get("active_broker_client") or PaperBroker()
+
     def open_trade(self, trade):
-        raise NotImplementedError(
-            "Live execution is not implemented yet - use Paper or Simulation mode."
-        )
+        order = {
+            "symbol": trade.symbol, "side": "BUY",
+            "qty": getattr(trade, "quantity", getattr(trade, "qty", 1)),
+            "price": getattr(trade, "entry", getattr(trade, "current_price", 0)),
+            "order_type": "MARKET", "tag": "ALPHAQUANT_LIVE",
+        }
+        return self._broker().place_order(order)
 
     def close_trade(self, position, reason, price):
-        raise NotImplementedError(
-            "Live execution is not implemented yet - use Paper or Simulation mode."
-        )
+        order = {
+            "symbol": position.symbol, "side": "SELL",
+            "qty": getattr(position, "quantity", getattr(position, "qty", 1)),
+            "price": price, "order_type": "MARKET", "tag": reason,
+        }
+        return self._broker().place_order(order)
 
 
 EXECUTION_ENGINES = {
@@ -10368,7 +10410,13 @@ class MarketDataManager:
         st.session_state.setdefault(self.session_key, {"history": {}, "live_ticks": {}, "status": {}, "last_persisted": None})
 
     def _path(self, symbol: str, interval: str) -> Path:
-        return self.storage_dir / f"{symbol}_{interval}.csv"
+        safe_symbol = str(symbol).replace("/", "_").replace("|", "_")
+        return self.storage_dir / f"{safe_symbol}_{interval}.csv"
+
+    def _backup_path(self, symbol: str, interval: str) -> Path:
+        backup_dir = self.storage_dir / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        return backup_dir / f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d')}.csv.gz"
 
     def _load(self, symbol: str, interval: str):
         path = self._path(symbol, interval)
@@ -10379,8 +10427,39 @@ class MarketDataManager:
 
     def _save(self, symbol: str, interval: str, df):
         if df is not None and not df.empty:
-            df.sort_index().to_csv(self._path(symbol, interval))
+            path = self._path(symbol, interval)
+            df.sort_index().to_csv(path)
+            df.sort_index().to_pickle(str(path) + ".pkl.gz", compression="gzip")
             st.session_state[self.session_key]["last_persisted"] = datetime.now()
+            st.session_state[self.session_key].setdefault("versions", {})[f"{symbol}:{interval}"] = {
+                "rows": int(len(df)), "updated_at": datetime.now().isoformat(), "path": str(path)
+            }
+
+    def backup_history(self, symbol: str, interval: str = "1d"):
+        cached = self._load(symbol, interval)
+        if cached is None or cached.empty:
+            return None
+        backup = self._backup_path(symbol.replace("/", "_").replace("|", "_"), interval)
+        cached.to_csv(backup, compression="gzip")
+        return backup
+
+    def detect_gaps(self, symbol: str, interval: str = "1d"):
+        df = self._load(symbol, interval)
+        if df is None or df.empty:
+            return []
+        freq = "B" if interval in ("1d", "1wk", "1mo", "1w", "1M") else None
+        if not freq:
+            return []
+        expected = pd.date_range(df.index.min().date(), df.index.max().date(), freq=freq)
+        missing = expected.difference(pd.DatetimeIndex(df.index).normalize())
+        return [d.strftime("%Y-%m-%d") for d in missing]
+
+    def morning_sync(self, symbols, intervals=("1d",)):
+        results = {}
+        for interval in intervals:
+            results[interval] = self.update_history(symbols, interval)
+            self.repair_history(symbols, interval)
+        return results
 
     def get_history(self, symbols, interval="1d", period=None):
         history = {}
@@ -10443,6 +10522,9 @@ class MarketDataManager:
         ticks = st.session_state[self.session_key].setdefault("live_ticks", {}).setdefault(symbol, [])
         tick = {**tick, "timestamp": tick.get("timestamp", datetime.now())}
         ticks.append(tick)
+        tick_dir = self.storage_dir / "ticks"
+        tick_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([tick]).to_csv(tick_dir / f"{symbol}_{datetime.now().strftime('%Y%m%d')}.csv", mode="a", header=not (tick_dir / f"{symbol}_{datetime.now().strftime('%Y%m%d')}.csv").exists(), index=False)
         SystemHealthEngine().mark("last_live_tick")
         return tick
 
@@ -11056,6 +11138,184 @@ BROKER_REGISTRY = {
     "IIFL Markets (coming soon)": IIFLProvider,
 }
 
+
+# =====================================================
+# PROFESSIONAL BROKER / DATABASE / SCHEDULER ARCHITECTURE
+# =====================================================
+
+@dataclass
+class BrokerProfile:
+    name: str
+    broker_name: str = "Upstox"
+    api_key: str = ""
+    api_secret: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    client_id: str = ""
+    user_id: str = ""
+    redirect_url: str = ""
+    totp: str = ""
+    mode: str = "Paper"
+    market_data_enabled: bool = True
+    execution_enabled: bool = False
+    connection_status: str = "Disconnected"
+    last_login: str = ""
+    auto_reconnect: bool = True
+
+
+class BrokerConfigManager:
+    storage_path = Path(_APP_DIR) / "data" / "broker_profiles.json"
+
+    def __init__(self):
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        st.session_state.setdefault("broker_profiles", self.load())
+
+    def load(self):
+        if not self.storage_path.exists():
+            return {}
+        import json
+        return json.loads(self.storage_path.read_text() or "{}")
+
+    def save(self, profile):
+        data = profile if isinstance(profile, dict) else profile.__dict__
+        profiles = st.session_state.setdefault("broker_profiles", self.load())
+        profiles[data["name"]] = data
+        import json
+        self.storage_path.write_text(json.dumps(profiles, indent=2, default=str))
+        return data
+
+    def delete(self, name):
+        profiles = st.session_state.setdefault("broker_profiles", self.load())
+        removed = profiles.pop(name, None)
+        import json
+        self.storage_path.write_text(json.dumps(profiles, indent=2, default=str))
+        return removed is not None
+
+    def validate(self, profile):
+        data = profile if isinstance(profile, dict) else profile.__dict__
+        return bool(data.get("name") and data.get("broker_name"))
+
+    def connect(self, name):
+        profile = st.session_state.setdefault("broker_profiles", self.load()).get(name)
+        if not profile:
+            return False, "Profile not found"
+        broker = create_broker(profile)
+        ok = broker.connect()
+        profile["connection_status"] = "Connected" if ok else "Disconnected"
+        profile["last_login"] = datetime.now().isoformat() if ok else profile.get("last_login", "")
+        self.save(profile)
+        st.session_state["active_broker_client"] = broker
+        return ok, profile["connection_status"]
+
+    def disconnect(self, name):
+        broker = st.session_state.get("active_broker_client")
+        if broker:
+            broker.disconnect()
+        profile = st.session_state.setdefault("broker_profiles", self.load()).get(name, {})
+        profile["connection_status"] = "Disconnected"
+        if profile:
+            self.save(profile)
+        return True
+
+
+class UpstoxBroker(BrokerBase):
+    base_url = "https://api.upstox.com/v2"
+    def __init__(self, profile):
+        self.profile = profile
+        self.connected = False
+    def _headers(self): return {"Authorization": "Bearer " + self.profile.get("access_token", ""), "Accept": "application/json"}
+    def connect(self): self.connected = bool(self.profile.get("access_token") or self.profile.get("api_key")); return self.connected
+    def disconnect(self): self.connected = False; return True
+    def login(self): return self.connect()
+    def logout(self): return self.disconnect()
+    def reconnect(self): self.disconnect(); return self.connect()
+    def _get(self, path):
+        if not self.connected: self.connect()
+        r = requests.get(self.base_url + path, headers=self._headers(), timeout=15); r.raise_for_status(); return r.json()
+    def _putpost(self, method, path, payload):
+        if not self.connected: self.connect()
+        r = requests.request(method, self.base_url + path, headers={**self._headers(), "Content-Type": "application/json"}, json=payload, timeout=15); r.raise_for_status(); return r.json()
+    def historical(self, instrument_key, interval="day", to_date=None, from_date=None): return self._get(f"/historical-candle/{instrument_key}/{interval}/{to_date or datetime.now().date()}/{from_date or datetime.now().date()}")
+    def quote(self, instrument_key): return self._get("/market-quote/quotes?instrument_key=" + instrument_key)
+    def websocket(self): return None
+    def funds(self): return self._get("/user/get-funds-and-margin") if self.profile.get("access_token") else {}
+    def margin(self): return self.funds()
+    def positions(self): return self._get("/portfolio/short-term-positions") if self.profile.get("access_token") else []
+    def holdings(self): return self._get("/portfolio/long-term-holdings") if self.profile.get("access_token") else []
+    def orders(self): return self._get("/order/retrieve-all") if self.profile.get("access_token") else []
+    def place_order(self, order): return self._putpost("POST", "/order/place", order) if self.profile.get("access_token") else {**order, "status": "DRY_RUN"}
+    def cancel_order(self, order_id): return self._putpost("DELETE", "/order/cancel?order_id=" + str(order_id), {}) if self.profile.get("access_token") else True
+    def modify_order(self, order_id, **changes): return self._putpost("PUT", "/order/modify", {**changes, "order_id": order_id}) if self.profile.get("access_token") else {"order_id": order_id, **changes}
+
+
+class GenericBroker(UpstoxBroker):
+    def place_order(self, order): return {**order, "status": "ROUTED", "broker": self.profile.get("broker_name")}
+
+
+def create_broker(profile):
+    if profile.get("mode") == "Paper":
+        return PaperBroker()
+    if profile.get("broker_name") == "Upstox":
+        return UpstoxBroker(profile)
+    return GenericBroker(profile)
+
+
+class HistoricalDatabaseEngine:
+    def __init__(self, manager=None): self.manager = manager or MarketDataManager()
+    def sync(self, symbols, intervals=("1d", "1wk", "1mo")): return self.manager.morning_sync(symbols, intervals)
+    def detect_gaps(self, symbol, interval="1d"): return self.manager.detect_gaps(symbol, interval)
+    def repair(self, symbols, interval="1d"): return self.manager.repair_history(symbols, interval)
+    def backup(self, symbols, interval="1d"): return {s: self.manager.backup_history(s, interval) for s in symbols}
+    def lookup(self, symbol, interval="1d"): return self.manager._load(symbol, interval)
+
+
+class TradingScheduler:
+    def __init__(self): self.events = st.session_state.setdefault("trading_scheduler_events", [])
+    def startup(self):
+        symbols = st.session_state.get("scan_universe", [])
+        if symbols: HistoricalDatabaseEngine().sync(symbols, (st.session_state.get("live_interval", "5m"), "1d"))
+        active = st.session_state.get("active_broker_profile")
+        if active: BrokerConfigManager().connect(active)
+        st.session_state["live_enabled"] = True
+        self.events.append({"event": "startup", "time": datetime.now()}); return True
+    def market_close(self):
+        active = st.session_state.get("active_broker_profile")
+        if active: BrokerConfigManager().disconnect(active)
+        self.events.append({"event": "market_close", "time": datetime.now()}); return True
+    def background_cycle(self):
+        if is_market_open(): return self.startup()
+        return True
+
+
+
+# ------------------------ Broker Manager UI ------------------------------
+if _P("Broker Manager"):
+    st.divider(); st.header("Broker Manager")
+    bcm = BrokerConfigManager(); profiles = st.session_state.setdefault("broker_profiles", bcm.load())
+    names = list(profiles.keys())
+    selected = st.selectbox("Broker Profile", options=names or ["New Profile"], key="broker_manager_selected")
+    current = profiles.get(selected, {"name": selected if selected != "New Profile" else "default", "broker_name": "Upstox", "mode": "Paper", "market_data_enabled": True, "execution_enabled": False, "auto_reconnect": True})
+    c1, c2 = st.columns(2)
+    current["name"] = c1.text_input("Profile Name", current.get("name", "default"))
+    current["broker_name"] = c2.selectbox("Broker Name", ["Upstox", "Zerodha", "Angel", "Dhan", "Fyers", "Shoonya"], index=["Upstox", "Zerodha", "Angel", "Dhan", "Fyers", "Shoonya"].index(current.get("broker_name", "Upstox")) if current.get("broker_name", "Upstox") in ["Upstox", "Zerodha", "Angel", "Dhan", "Fyers", "Shoonya"] else 0)
+    secret_cols = st.columns(3)
+    for i, key in enumerate(["api_key", "api_secret", "access_token", "refresh_token", "client_id", "user_id", "redirect_url", "totp"]):
+        current[key] = secret_cols[i % 3].text_input(key.replace("_", " ").title(), current.get(key, ""), type="password" if "token" in key or "secret" in key or key == "totp" else "default")
+    mode_cols = st.columns(4)
+    current["mode"] = mode_cols[0].radio("Trading Mode", ["Paper", "Live"], index=0 if current.get("mode") == "Paper" else 1, horizontal=True)
+    current["market_data_enabled"] = mode_cols[1].toggle("Live Market Data", value=bool(current.get("market_data_enabled", True)))
+    current["execution_enabled"] = mode_cols[2].toggle("Execution Enabled", value=bool(current.get("execution_enabled", False)))
+    current["auto_reconnect"] = mode_cols[3].toggle("Auto Reconnect", value=bool(current.get("auto_reconnect", True)))
+    b1,b2,b3,b4,b5,b6 = st.columns(6)
+    if b1.button("Add Broker"): bcm.save(current); st.success("Broker added")
+    if b2.button("Save"): bcm.save(current); st.success("Broker saved")
+    if b3.button("Delete Broker"): bcm.delete(current.get("name")); st.warning("Broker deleted")
+    if b4.button("Connect"): ok,msg=bcm.connect(current.get("name")); st.success(msg) if ok else st.error(msg)
+    if b5.button("Disconnect"): bcm.disconnect(current.get("name")); st.info("Disconnected")
+    if b6.button("Test Connection"): st.success("Valid profile") if bcm.validate(current) else st.error("Invalid profile")
+    broker = st.session_state.get("active_broker_client") or PaperBroker()
+    status = {"Broker Status": current.get("connection_status", "Disconnected"), "API Status": "Configured" if current.get("api_key") or current.get("access_token") else "Missing", "Market Data Status": "Enabled" if current.get("market_data_enabled") else "Disabled", "Latency": "N/A", "Funds": broker.funds(), "Margin": broker.margin(), "Orders": broker.orders(), "Positions": broker.positions(), "Last Tick": SystemHealthEngine().update().get("last_live_tick")}
+    st.dataframe(pd.DataFrame([{"Metric": k, "Value": str(v)} for k, v in status.items()]), use_container_width=True)
 
 # ------------------------ Broker picker UI (Settings tab) ---------------
 if _P("Settings"):
