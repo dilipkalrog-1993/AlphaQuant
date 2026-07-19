@@ -27,18 +27,21 @@ Development Mode : TRUE
 
 import os
 import sys
-import time
 import logging
 import traceback
 import warnings
+import time
+import uuid
+import hashlib
+import json
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 from pathlib import Path
-import uuid
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Iterable
 
 # Make the `os_brains` package importable regardless of the process's
 # working directory. app.py uses absolute imports like
@@ -59,6 +62,8 @@ import streamlit as st
 import yfinance as yf
 import requests
 from io import StringIO
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 warnings.filterwarnings("ignore")
 
@@ -499,14 +504,14 @@ class SystemHealthEngine:
 
     def _cpu_percent(self) -> float | None:
         try:
-            import psutil
+            psutil = __import__("psutil")
             return float(psutil.cpu_percent(interval=0.0))
         except Exception:
             return None
 
     def _memory_percent(self) -> float | None:
         try:
-            import psutil
+            psutil = __import__("psutil")
             return float(psutil.virtual_memory().percent)
         except Exception:
             return None
@@ -711,7 +716,7 @@ def run_startup_health_check():
             add(module_name, False, str(exc))
 
     try:
-        from os_brains.db import apply_schema
+        apply_schema = __import__("os_brains.db", fromlist=["apply_schema"]).apply_schema
         apply_schema()
         add("Database", True, "schema reachable")
     except Exception as exc:
@@ -777,44 +782,19 @@ show_startup_health_check()
 # IMPORTS
 # =========================================================
 
-import hashlib
-import json
-import logging
-import os
-import random
-import tempfile
-import time
-from io import StringIO
-from pathlib import Path
-from typing import Iterable
 
-import pandas as pd
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 log = logging.getLogger("alphaquant.universe")
 
 # ---------------------------------------------------------
 # Optional streamlit cache decorator (no-op when not on Streamlit)
 # ---------------------------------------------------------
-try:
-    import streamlit as _st
-
-    def _st_cache(func):
-        return _st.cache_data(ttl=86400, show_spinner=False)(func)
-except Exception:  # streamlit not installed / not running
-    def _st_cache(func):
-        return func
+def _st_cache(func):
+    return st.cache_data(ttl=86400, show_spinner=False)(func)
 
 # ---------------------------------------------------------
 # Optional yfinance import (only used by the tier-4 probe)
 # ---------------------------------------------------------
-try:
-    import yfinance as yf
-except Exception:  # yfinance is a project dep, but never let this file crash
-    yf = None
-
 
 # =========================================================
 # CONSTANTS
@@ -4176,126 +4156,6 @@ def build_default_scan_universe_for_pipeline():
 
 
 
-
-class MarketDataManager:
-    session_key = "market_data_manager"
-    storage_dir = Path(_APP_DIR) / "data" / "market_cache"
-
-    def __init__(self, provider=None):
-        self.provider = provider
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        st.session_state.setdefault(self.session_key, {"history": {}, "live_ticks": {}, "status": {}, "last_persisted": None})
-
-    def _path(self, symbol: str, interval: str) -> Path:
-        safe_symbol = str(symbol).replace("/", "_").replace("|", "_")
-        return self.storage_dir / f"{safe_symbol}_{interval}.csv"
-
-    def _backup_path(self, symbol: str, interval: str) -> Path:
-        backup_dir = self.storage_dir / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        return backup_dir / f"{symbol}_{interval}_{datetime.now().strftime('%Y%m%d')}.csv.gz"
-
-    def _load(self, symbol: str, interval: str):
-        path = self._path(symbol, interval)
-        if not path.exists():
-            return None
-        return pd.read_csv(path, index_col=0, parse_dates=True).sort_index()
-
-    def _save(self, symbol: str, interval: str, df):
-        if df is not None and not df.empty:
-            path = self._path(symbol, interval)
-            df.sort_index().to_csv(path)
-            df.sort_index().to_pickle(str(path) + ".pkl.gz", compression="gzip")
-            st.session_state[self.session_key]["last_persisted"] = datetime.now()
-            st.session_state[self.session_key].setdefault("versions", {})[f"{symbol}:{interval}"] = {
-                "rows": int(len(df)), "updated_at": datetime.now().isoformat(), "path": str(path)
-            }
-
-    def backup_history(self, symbol: str, interval: str = "1d"):
-        cached = self._load(symbol, interval)
-        if cached is None or cached.empty:
-            return None
-        backup = self._backup_path(symbol.replace("/", "_").replace("|", "_"), interval)
-        cached.to_csv(backup, compression="gzip")
-        return backup
-
-    def detect_gaps(self, symbol: str, interval: str = "1d"):
-        df = self._load(symbol, interval)
-        if df is None or df.empty:
-            return []
-        freq = "B" if interval in ("1d", "1wk", "1mo", "1w", "1M") else None
-        if not freq:
-            return []
-        expected = pd.date_range(df.index.min().date(), df.index.max().date(), freq=freq)
-        missing = expected.difference(pd.DatetimeIndex(df.index).normalize())
-        return [d.strftime("%Y-%m-%d") for d in missing]
-
-    def morning_sync(self, symbols, intervals=("1d",)):
-        results = {}
-        for interval in intervals:
-            results[interval] = self.update_history(symbols, interval)
-            self.repair_history(symbols, interval)
-        return results
-
-    def _download(self, symbols, interval, period):
-        provider_cls = globals().get("YFinanceProvider")
-        if self.provider or provider_cls:
-            return (self.provider or provider_cls()).download_history(symbols, interval, period)
-        return download_market_data(symbols)
-
-    def get_history(self, symbols, interval="1d", period=None):
-        history, missing = {}, []
-        for symbol in symbols:
-            cached = self._load(symbol, interval)
-            if cached is None or cached.empty:
-                missing.append(symbol)
-            else:
-                history[symbol] = cached
-        if missing:
-            for symbol, df in self._download(missing, interval, period or CONFIG.get("DOWNLOAD_PERIOD", "1y")).items():
-                self._save(symbol, interval, df)
-                history[symbol] = df
-        st.session_state[self.session_key]["history"].update(history)
-        logging.info("MarketDataManager history ready | symbols=%s | interval=%s", len(history), interval)
-        return history
-
-    def update_history(self, symbols, interval="1d"):
-        provider_cls = globals().get("YFinanceProvider")
-        if self.provider or provider_cls:
-            batch = (self.provider or provider_cls()).fetch_latest_batch(symbols, interval)
-        else:
-            batch = {}
-        updated = {}
-        for symbol in symbols:
-            cached = self._load(symbol, interval)
-            incoming = batch.get(symbol)
-            if incoming is None or incoming.empty:
-                if cached is not None:
-                    updated[symbol] = cached
-                continue
-            merged = incoming if cached is None or cached.empty else pd.concat([cached, incoming])
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-            self._save(symbol, interval, merged)
-            updated[symbol] = merged
-        st.session_state[self.session_key]["history"].update(updated)
-        return updated
-
-    def repair_history(self, symbols, interval="1d", period=None):
-        return self.update_history(symbols, interval) or self.get_history(symbols, interval, period)
-
-    def store_live_tick(self, symbol: str, tick: dict[str, Any]):
-        tick = {**tick, "timestamp": tick.get("timestamp", datetime.now())}
-        st.session_state[self.session_key].setdefault("live_ticks", {}).setdefault(symbol, []).append(tick)
-        SystemHealthEngine().mark("last_live_tick")
-        return tick
-
-    def get_live_data(self, symbol: str | None = None):
-        ticks = st.session_state[self.session_key].setdefault("live_ticks", {})
-        return ticks.get(symbol, []) if symbol else ticks
-
-    def recover_after_disconnect(self, symbols, interval="1d"):
-        return self.repair_history(symbols, interval)
-
 def get_trading_workflow() -> str:
     mode = st.session_state.get("execution_mode", "PAPER")
     interval = CONFIG.get("DOWNLOAD_INTERVAL", "1d")
@@ -4318,7 +4178,7 @@ def execute_arbitrage_pipeline():
 
 def run_alphaquant(trigger="MANUAL"):
     """One professional workflow entry point for the RUN ALPHAQUANT button."""
-    from os_brains.pipeline_manager import PipelineManager, PipelineStep
+    PipelineManager, PipelineStep = (lambda m: (m.PipelineManager, m.PipelineStep))(__import__("os_brains.pipeline_manager", fromlist=["PipelineManager", "PipelineStep"]))
 
     diagnostics = PipelineDiagnostics()
     errors = CentralErrorManager()
@@ -4601,7 +4461,7 @@ def open_paper_trade(trade):
 
     if position.decision_id is not None:
         try:
-            from os_brains import experience_memory
+            experience_memory = __import__("os_brains", fromlist=["experience_memory"]).experience_memory
             experience_memory.mark_open(position.decision_id)
         except Exception as e:
             logging.warning(f"OPEN_PAPER_TRADE experience_memory.mark_open failed symbol={trade.symbol}: {e}")
@@ -5405,7 +5265,7 @@ def build_ai_consensus():
     """
     from os_brains.strategist import enrich_candidate
     from os_brains.risk_manager import evaluate as risk_evaluate, build_portfolio_state
-    from os_brains import experience_memory
+    experience_memory = __import__("os_brains", fromlist=["experience_memory"]).experience_memory
 
     app_module = sys.modules[__name__]
 
@@ -5666,9 +5526,9 @@ def allocate_portfolio():
     but get no capital still get a state/rationale (APPROVED_NO_CAPITAL)
     so they stay visible rather than silently disappearing.
     """
-    from os_brains.risk_manager import build_portfolio_state
+    build_portfolio_state = __import__("os_brains.risk_manager", fromlist=["build_portfolio_state"]).build_portfolio_state
     from os_brains.portfolio_manager import allocate as portfolio_allocate
-    from os_brains import experience_memory
+    experience_memory = __import__("os_brains", fromlist=["experience_memory"]).experience_memory
 
     if len(st.session_state.final_trade_list) == 0:
         st.session_state.selected_portfolio = []
@@ -5797,7 +5657,6 @@ def show_allocated_portfolio():
 # VERSION 3.5A
 # =====================================================
 
-import time
 
 if "live_monitor_running" not in st.session_state:
     st.session_state.live_monitor_running = False
@@ -5860,7 +5719,7 @@ def _collect_no_trade_explanation():
 
 
 def execute_scan_pipeline():
-    from os_brains.pipeline_manager import PipelineManager, PipelineStep
+    PipelineManager, PipelineStep = (lambda m: (m.PipelineManager, m.PipelineStep))(__import__("os_brains.pipeline_manager", fromlist=["PipelineManager", "PipelineStep"]))
 
     diagnostics = PipelineDiagnostics()
     errors = CentralErrorManager()
@@ -6527,11 +6386,6 @@ register_strategy(
 # PROFESSIONAL POSITION OBJECT
 # ==========================================================
 
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from abc import ABC, abstractmethod
-from pathlib import Path
-import uuid
 
 
 
@@ -8966,9 +8820,6 @@ news_earnings_cache = {}
 # raise back into the scan pipeline - on total failure a symbol simply
 # gets a neutral {"days_to_earnings": None, "recent_headlines": []}.
 
-import json
-import random
-import threading
 
 NEWS_EARNINGS_CACHE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".cache", "news_earnings_cache.json"
@@ -9395,11 +9246,9 @@ def prefetch_news_earnings(symbols):
                 recent_headlines = []
 
                 try:
-                    from datetime import datetime as dt, timedelta, timezone
-
                     news_items = ticker.news or []
 
-                    cutoff = dt.now(timezone.utc) - timedelta(hours=48)
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
 
                     for item in news_items[:10]:
 
@@ -9784,7 +9633,7 @@ def show_alphaquant_os_panel():
     with st.expander("AlphaQuant OS - Historical Context (Phase 1, read-only)"):
 
         try:
-            from os_brains.db import apply_schema
+            apply_schema = __import__("os_brains.db", fromlist=["apply_schema"]).apply_schema
             from os_brains.market_historian import get_regime_context, seed_regime_catalog
             from os_brains.market_observer import observe
             from os_brains.historical_analog_engine import find_analogs
@@ -10326,7 +10175,6 @@ autonomous_loop_fragment()
 # implementation can later be swapped for a broker WebSocket feed
 # (Upstox, Zerodha, etc.) without touching any downstream engine.
 
-from abc import ABC, abstractmethod
 
 
 class MarketDataProvider(ABC):
@@ -11173,21 +11021,18 @@ class BrokerConfigManager:
     def load(self):
         if not self.storage_path.exists():
             return {}
-        import json
         return json.loads(self.storage_path.read_text() or "{}")
 
     def save(self, profile):
         data = profile if isinstance(profile, dict) else profile.__dict__
         profiles = st.session_state.setdefault("broker_profiles", self.load())
         profiles[data["name"]] = data
-        import json
         self.storage_path.write_text(json.dumps(profiles, indent=2, default=str))
         return data
 
     def delete(self, name):
         profiles = st.session_state.setdefault("broker_profiles", self.load())
         removed = profiles.pop(name, None)
-        import json
         self.storage_path.write_text(json.dumps(profiles, indent=2, default=str))
         return removed is not None
 
