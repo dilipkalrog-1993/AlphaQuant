@@ -32,7 +32,10 @@ import logging
 import traceback
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
+from pathlib import Path
+import uuid
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -391,6 +394,158 @@ if "no_trade_explanation" not in st.session_state:
 if "startup_health" not in st.session_state:
     st.session_state.startup_health = []
 
+if "pipeline_phases" not in st.session_state:
+    st.session_state.pipeline_phases = {}
+
+if "pipeline_errors" not in st.session_state:
+    st.session_state.pipeline_errors = []
+
+if "system_health" not in st.session_state:
+    st.session_state.system_health = {"startup_time": datetime.now()}
+
+if "pipeline_monitor" not in st.session_state:
+    st.session_state.pipeline_monitor = {}
+
+if "paper_broker" not in st.session_state:
+    st.session_state.paper_broker = {"connected": False, "cash": 1_000_000.0, "positions": {}, "orders": {}, "trade_history": [], "realized_pnl": 0.0, "risk": {}}
+
+
+@dataclass
+class PipelinePhase:
+    phase_name: str
+    status: str = "PENDING"
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration: float = 0.0
+    progress_percent: float = 0.0
+    message: str = ""
+
+
+@dataclass
+class PipelineError:
+    timestamp: datetime
+    phase: str
+    component: str
+    severity: str
+    error_type: str
+    message: str
+    traceback: str
+    resolved: bool = False
+
+
+class CentralErrorManager:
+    session_key = "pipeline_errors"
+
+    def __init__(self, logger: logging.Logger | None = None):
+        self.logger = logger or logging.getLogger(__name__)
+        st.session_state.setdefault(self.session_key, [])
+
+    def record_error(self, phase: str, component: str, error: Exception | str, severity: str = "ERROR") -> PipelineError:
+        err = PipelineError(
+            timestamp=datetime.now(),
+            phase=phase,
+            component=component,
+            severity=severity,
+            error_type=type(error).__name__ if isinstance(error, Exception) else "RuntimeError",
+            message=str(error),
+            traceback=traceback.format_exc() if isinstance(error, Exception) else "",
+            resolved=False,
+        )
+        st.session_state.setdefault(self.session_key, []).append(err)
+        self.logger.error(
+            "Pipeline error | phase=%s | component=%s | severity=%s | type=%s | message=%s",
+            err.phase, err.component, err.severity, err.error_type, err.message,
+        )
+        return err
+
+    def resolve_error(self, index: int) -> bool:
+        errors = st.session_state.setdefault(self.session_key, [])
+        if 0 <= index < len(errors):
+            errors[index].resolved = True
+            self.logger.info("Pipeline error resolved | index=%s", index)
+            return True
+        return False
+
+    def get_errors(self, include_resolved: bool = True) -> list[PipelineError]:
+        errors = st.session_state.setdefault(self.session_key, [])
+        return list(errors if include_resolved else [e for e in errors if not e.resolved])
+
+    def clear_resolved(self) -> int:
+        errors = st.session_state.setdefault(self.session_key, [])
+        before = len(errors)
+        st.session_state[self.session_key] = [e for e in errors if not e.resolved]
+        cleared = before - len(st.session_state[self.session_key])
+        self.logger.info("Cleared resolved pipeline errors | count=%s", cleared)
+        return cleared
+
+
+class SystemHealthEngine:
+    session_key = "system_health"
+
+    def __init__(self):
+        st.session_state.setdefault(self.session_key, {"startup_time": datetime.now()})
+
+    def update(self, **kwargs) -> dict[str, Any]:
+        health = st.session_state.setdefault(self.session_key, {"startup_time": datetime.now()})
+        health.setdefault("startup_time", datetime.now())
+        health["cpu_percent"] = self._cpu_percent()
+        health["memory_percent"] = self._memory_percent()
+        health["pipeline_runtime"] = self._runtime_seconds(st.session_state.get("pipeline_started_at"))
+        health.update(kwargs)
+        return health
+
+    def mark(self, key: str) -> dict[str, Any]:
+        return self.update(**{key: datetime.now()})
+
+    def _cpu_percent(self) -> float | None:
+        try:
+            import psutil
+            return float(psutil.cpu_percent(interval=0.0))
+        except Exception:
+            return None
+
+    def _memory_percent(self) -> float | None:
+        try:
+            import psutil
+            return float(psutil.virtual_memory().percent)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _runtime_seconds(started_at) -> float:
+        if not started_at:
+            return 0.0
+        return round((datetime.now() - started_at).total_seconds(), 2)
+
+
+class PipelineMonitor:
+    session_key = "pipeline_monitor"
+
+    def __init__(self):
+        st.session_state.setdefault(self.session_key, {})
+
+    def update(self) -> dict[str, Any]:
+        phases = st.session_state.setdefault("pipeline_phases", {})
+        ordered = list(phases.values())
+        completed = [p.phase_name for p in ordered if p.status == "COMPLETED"]
+        failed = [p.phase_name for p in ordered if p.status == "FAILED"]
+        active = next((p for p in ordered if p.status == "RUNNING"), None)
+        pending = [p.phase_name for p in ordered if p.status == "PENDING"]
+        started = st.session_state.get("pipeline_started_at")
+        runtime = SystemHealthEngine._runtime_seconds(started)
+        avg = runtime / max(1, len(completed)) if completed else 0
+        estimate = datetime.now() + timedelta(seconds=avg * len(pending)) if pending and avg else None
+        monitor = {
+            "current_phase": active.phase_name if active else ("FAILED" if failed else "IDLE"),
+            "completed_phases": completed,
+            "failed_phases": failed,
+            "remaining_phases": pending,
+            "estimated_completion": estimate,
+            "pipeline_runtime": runtime,
+        }
+        st.session_state[self.session_key] = monitor
+        return monitor
+
 
 @dataclass(slots=True)
 class PipelineDiagnostics:
@@ -428,6 +583,47 @@ class PipelineDiagnostics:
             )
         except Exception as exc:
             self.logger.warning("Pipeline diagnostics recording failed: %s", exc)
+
+    def register_phase(self, phase_name: str, message: str = "") -> PipelinePhase:
+        phases = st.session_state.setdefault("pipeline_phases", {})
+        phase = PipelinePhase(phase_name=phase_name, status="RUNNING", started_at=datetime.now(), progress_percent=0.0, message=message)
+        phases[phase_name] = phase
+        self.record(phase_name, "RUNNING", message)
+        PipelineMonitor().update()
+        return phase
+
+    def update_progress(self, phase_name: str, progress_percent: float, message: str = "") -> PipelinePhase:
+        phases = st.session_state.setdefault("pipeline_phases", {})
+        phase = phases.get(phase_name) or self.register_phase(phase_name, message)
+        phase.progress_percent = max(0.0, min(100.0, float(progress_percent)))
+        if message:
+            phase.message = message
+        self.record(phase_name, "PROGRESS", phase.message, {"progress_percent": phase.progress_percent})
+        PipelineMonitor().update()
+        return phase
+
+    def complete_phase(self, phase_name: str, message: str = "Completed") -> PipelinePhase:
+        phases = st.session_state.setdefault("pipeline_phases", {})
+        phase = phases.get(phase_name) or self.register_phase(phase_name, message)
+        phase.status = "COMPLETED"
+        phase.completed_at = datetime.now()
+        phase.duration = round((phase.completed_at - (phase.started_at or phase.completed_at)).total_seconds(), 2)
+        phase.progress_percent = 100.0
+        phase.message = message
+        self.record(phase_name, "COMPLETED", message, {"duration": phase.duration})
+        PipelineMonitor().update()
+        return phase
+
+    def fail_phase(self, phase_name: str, message: str = "Failed") -> PipelinePhase:
+        phases = st.session_state.setdefault("pipeline_phases", {})
+        phase = phases.get(phase_name) or self.register_phase(phase_name, message)
+        phase.status = "FAILED"
+        phase.completed_at = datetime.now()
+        phase.duration = round((phase.completed_at - (phase.started_at or phase.completed_at)).total_seconds(), 2)
+        phase.message = message
+        self.record(phase_name, "FAILED", message, {"duration": phase.duration})
+        PipelineMonitor().update()
+        return phase
 
     def record_startup_health(self, checks: list[dict[str, Any]]) -> None:
         """Capture startup health summary diagnostics only."""
@@ -3948,6 +4144,16 @@ def _pipeline_event(event):
         "Message": event.message,
     })
     st.session_state.brain_status[event.step] = event.status
+    diagnostics = PipelineDiagnostics()
+    status = str(event.status).upper()
+    if status in ("STARTED", "RUNNING"):
+        diagnostics.register_phase(event.step, event.message)
+    elif status in ("COMPLETED", "SUCCESS", "OK"):
+        diagnostics.complete_phase(event.step, event.message or "Completed")
+    elif status in ("FAILED", "ERROR"):
+        diagnostics.fail_phase(event.step, event.message or "Failed")
+    else:
+        diagnostics.update_progress(event.step, 50.0, event.message)
 
 
 def build_default_scan_universe_for_pipeline():
@@ -3969,10 +4175,123 @@ def build_default_scan_universe_for_pipeline():
     return f"{len(st.session_state.scan_universe)} symbols"
 
 
+
+
+class MarketDataManager:
+    session_key = "market_data_manager"
+    storage_dir = Path(_APP_DIR) / "data" / "market_cache"
+
+    def __init__(self, provider=None):
+        self.provider = provider
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        st.session_state.setdefault(self.session_key, {"history": {}, "live_ticks": {}, "status": {}, "last_persisted": None})
+
+    def _path(self, symbol: str, interval: str) -> Path:
+        return self.storage_dir / f"{symbol}_{interval}.csv"
+
+    def _load(self, symbol: str, interval: str):
+        path = self._path(symbol, interval)
+        if not path.exists():
+            return None
+        return pd.read_csv(path, index_col=0, parse_dates=True).sort_index()
+
+    def _save(self, symbol: str, interval: str, df):
+        if df is not None and not df.empty:
+            df.sort_index().to_csv(self._path(symbol, interval))
+            st.session_state[self.session_key]["last_persisted"] = datetime.now()
+
+    def _download(self, symbols, interval, period):
+        provider_cls = globals().get("YFinanceProvider")
+        if self.provider or provider_cls:
+            return (self.provider or provider_cls()).download_history(symbols, interval, period)
+        return download_market_data(symbols)
+
+    def get_history(self, symbols, interval="1d", period=None):
+        history, missing = {}, []
+        for symbol in symbols:
+            cached = self._load(symbol, interval)
+            if cached is None or cached.empty:
+                missing.append(symbol)
+            else:
+                history[symbol] = cached
+        if missing:
+            for symbol, df in self._download(missing, interval, period or CONFIG.get("DOWNLOAD_PERIOD", "1y")).items():
+                self._save(symbol, interval, df)
+                history[symbol] = df
+        st.session_state[self.session_key]["history"].update(history)
+        logging.info("MarketDataManager history ready | symbols=%s | interval=%s", len(history), interval)
+        return history
+
+    def update_history(self, symbols, interval="1d"):
+        provider_cls = globals().get("YFinanceProvider")
+        if self.provider or provider_cls:
+            batch = (self.provider or provider_cls()).fetch_latest_batch(symbols, interval)
+        else:
+            batch = {}
+        updated = {}
+        for symbol in symbols:
+            cached = self._load(symbol, interval)
+            incoming = batch.get(symbol)
+            if incoming is None or incoming.empty:
+                if cached is not None:
+                    updated[symbol] = cached
+                continue
+            merged = incoming if cached is None or cached.empty else pd.concat([cached, incoming])
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            self._save(symbol, interval, merged)
+            updated[symbol] = merged
+        st.session_state[self.session_key]["history"].update(updated)
+        return updated
+
+    def repair_history(self, symbols, interval="1d", period=None):
+        return self.update_history(symbols, interval) or self.get_history(symbols, interval, period)
+
+    def store_live_tick(self, symbol: str, tick: dict[str, Any]):
+        tick = {**tick, "timestamp": tick.get("timestamp", datetime.now())}
+        st.session_state[self.session_key].setdefault("live_ticks", {}).setdefault(symbol, []).append(tick)
+        SystemHealthEngine().mark("last_live_tick")
+        return tick
+
+    def get_live_data(self, symbol: str | None = None):
+        ticks = st.session_state[self.session_key].setdefault("live_ticks", {})
+        return ticks.get(symbol, []) if symbol else ticks
+
+    def recover_after_disconnect(self, symbols, interval="1d"):
+        return self.repair_history(symbols, interval)
+
+def get_trading_workflow() -> str:
+    mode = st.session_state.get("execution_mode", "PAPER")
+    interval = CONFIG.get("DOWNLOAD_INTERVAL", "1d")
+    if mode == "PAPER":
+        return "PAPER_TRADING"
+    return "INTRADAY" if interval not in ("1d", "1wk", "1mo") else "POSITIONAL"
+
+
+def execute_arbitrage_pipeline():
+    diagnostics = PipelineDiagnostics()
+    diagnostics.register_phase("Arbitrage Pipeline", "Arbitrage execution foundation initialized")
+    st.session_state["arbitrage_pipeline"] = {
+        "status": "READY",
+        "last_checked": datetime.now(),
+        "message": "Arbitrage strategy logic not implemented yet",
+    }
+    diagnostics.complete_phase("Arbitrage Pipeline", "Arbitrage foundation ready")
+    return st.session_state["arbitrage_pipeline"]
+
+
 def run_alphaquant(trigger="MANUAL"):
     """One professional workflow entry point for the RUN ALPHAQUANT button."""
     from os_brains.pipeline_manager import PipelineManager, PipelineStep
 
+    diagnostics = PipelineDiagnostics()
+    errors = CentralErrorManager()
+    health = SystemHealthEngine()
+    if "PaperBroker" in globals():
+        PaperBroker().connect()
+    health.mark("last_broker_sync")
+    st.session_state["trading_workflow"] = get_trading_workflow()
+    st.session_state.pipeline_started_at = datetime.now()
+    st.session_state.pipeline_phases = {}
     st.session_state.pipeline_events = []
     st.session_state.brain_status = {}
     st.session_state.decision_funnel = []
@@ -3983,13 +4302,25 @@ def run_alphaquant(trigger="MANUAL"):
     def download_stage():
         if not st.session_state.scan_universe:
             return False
-        st.session_state.market_data = download_market_data(st.session_state.scan_universe)
+        data_manager = MarketDataManager()
+        manager_data = data_manager.get_history(
+            st.session_state.scan_universe,
+            CONFIG.get("DOWNLOAD_INTERVAL", "1d"),
+            CONFIG.get("DOWNLOAD_PERIOD", "1y"),
+        )
+        manager_data = data_manager.update_history(st.session_state.scan_universe, CONFIG.get("DOWNLOAD_INTERVAL", "1d")) or manager_data
+        st.session_state.market_data = manager_data
         return f"{len(st.session_state.market_data)} datasets" if st.session_state.market_data else False
 
-    ok = manager.run([
-        PipelineStep("Build Universe", build_default_scan_universe_for_pipeline, "Building selected universe"),
-        PipelineStep("Download Data", download_stage, "Downloading OHLCV data"),
-    ])
+    try:
+        ok = manager.run([
+            PipelineStep("Build Universe", build_default_scan_universe_for_pipeline, "Building selected universe"),
+            PipelineStep("Download Data", download_stage, "Downloading OHLCV data"),
+        ])
+    except Exception as exc:
+        errors.record_error("Run AlphaQuant", "run_alphaquant", exc)
+        diagnostics.fail_phase("Run AlphaQuant", str(exc))
+        return False, "AlphaQuant stopped after an unexpected error. See Mission Control errors."
 
     if not ok:
         return False, "AlphaQuant stopped before scan execution. See Mission Control logs."
@@ -3997,6 +4328,8 @@ def run_alphaquant(trigger="MANUAL"):
     st.session_state.run_complete_scan_requested = True
     st.session_state.last_cycle_time = datetime.now()
     st.session_state.last_cycle_trigger = trigger
+    health.mark("last_scan")
+    PipelineMonitor().update()
     return True, f"RUN ALPHAQUANT queued: {len(st.session_state.market_data)} symbols."
 
 
@@ -5492,6 +5825,10 @@ def _collect_no_trade_explanation():
 def execute_scan_pipeline():
     from os_brains.pipeline_manager import PipelineManager, PipelineStep
 
+    diagnostics = PipelineDiagnostics()
+    errors = CentralErrorManager()
+    health = SystemHealthEngine()
+    st.session_state.pipeline_started_at = st.session_state.get("pipeline_started_at") or datetime.now()
     manager = PipelineManager(on_event=_pipeline_event)
 
     def initialize_stage():
@@ -5585,21 +5922,30 @@ def execute_scan_pipeline():
         _collect_no_trade_explanation()
         return f"Experience Memory updated; reviewer has {reviewed} closed position(s) available"
 
-    ok = manager.run([
-        PipelineStep("Market Observer", initialize_stage, "Preparing market context"),
-        PipelineStep("Market Historian", lambda: "Regime catalog/context available", "Historian ready"),
-        PipelineStep("Trade Candidate Engine", scan_stage, "Running indicators, Batch 1, Batch 2 and strategies"),
-        PipelineStep("Historical Analog Engine", consensus_stage, "Strategist, analog evidence, risk and consensus"),
-        PipelineStep("Strategist", lambda: "Strategist evidence included in consensus", "Completed"),
-        PipelineStep("Risk Manager", lambda: "Risk verdicts captured", "Completed"),
-        PipelineStep("Portfolio Manager", portfolio_stage, "Allocating approved trades"),
-        PipelineStep("AI Consensus", lambda: "Consensus ranking refreshed", "Completed"),
-        PipelineStep("Paper Trading Engine", paper_stage, "Opening/monitoring paper trades"),
-        PipelineStep("Reviewer", reviewer_memory_stage, "Recording learning updates"),
-        PipelineStep("Experience Memory", lambda: "Decision memory synchronized", "Completed"),
-        PipelineStep("Dashboard Refresh", lambda: "Mission Control refreshed", "Completed"),
-    ])
+    try:
+        ok = manager.run([
+            PipelineStep("Market Observer", initialize_stage, "Preparing market context"),
+            PipelineStep("Market Historian", lambda: "Regime catalog/context available", "Historian ready"),
+            PipelineStep("Trade Candidate Engine", scan_stage, "Running indicators, Batch 1, Batch 2 and strategies"),
+            PipelineStep("Historical Analog Engine", consensus_stage, "Strategist, analog evidence, risk and consensus"),
+            PipelineStep("Strategist", lambda: "Strategist evidence included in consensus", "Completed"),
+            PipelineStep("Risk Manager", lambda: "Risk verdicts captured", "Completed"),
+            PipelineStep("Portfolio Manager", portfolio_stage, "Allocating approved trades"),
+            PipelineStep("AI Consensus", lambda: "Consensus ranking refreshed", "Completed"),
+            PipelineStep("Paper Trading Engine", paper_stage, "Opening/monitoring paper trades"),
+            PipelineStep("Reviewer", reviewer_memory_stage, "Recording learning updates"),
+            PipelineStep("Experience Memory", lambda: "Decision memory synchronized", "Completed"),
+            PipelineStep("Dashboard Refresh", lambda: "Mission Control refreshed", "Completed"),
+        ])
+    except Exception as exc:
+        errors.record_error("Scan Pipeline", "execute_scan_pipeline", exc)
+        diagnostics.fail_phase("Scan Pipeline", str(exc))
+        st.error("Pipeline stopped after an unexpected error. See Mission Control errors.")
+        return
 
+    health.mark("last_strategy_run")
+    execute_arbitrage_pipeline()
+    PipelineMonitor().update()
     if ok:
         st.success("Pipeline Completed Successfully")
     else:
@@ -6145,8 +6491,135 @@ register_strategy(
 # ==========================================================
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
+from pathlib import Path
+import uuid
 
+
+
+
+class BrokerBase(ABC):
+    @abstractmethod
+    def connect(self): ...
+    @abstractmethod
+    def disconnect(self): ...
+    @abstractmethod
+    def place_order(self, order): ...
+    @abstractmethod
+    def modify_order(self, order_id, **changes): ...
+    @abstractmethod
+    def cancel_order(self, order_id): ...
+    @abstractmethod
+    def positions(self): ...
+    @abstractmethod
+    def holdings(self): ...
+    @abstractmethod
+    def orders(self): ...
+    @abstractmethod
+    def funds(self): ...
+    @abstractmethod
+    def margin(self): ...
+
+
+class PaperBroker(BrokerBase):
+    def __init__(self, initial_cash: float = 1_000_000.0):
+        self.state = st.session_state.setdefault("paper_broker", {
+            "connected": False, "cash": initial_cash, "positions": {},
+            "orders": {}, "trade_history": [], "realized_pnl": 0.0, "risk": {},
+        })
+
+    def connect(self):
+        self.state["connected"] = True
+        logging.info("PaperBroker connected")
+        return True
+
+    def disconnect(self):
+        self.state["connected"] = False
+        logging.info("PaperBroker disconnected")
+        return True
+
+    def place_order(self, order):
+        order = dict(order)
+        order_id = order.get("order_id") or str(uuid.uuid4())
+        order.update({"order_id": order_id, "status": "OPEN", "timestamp": datetime.now()})
+        self.state["orders"][order_id] = order
+        if order.get("order_type", "MARKET").upper() == "MARKET":
+            self._execute_order(order_id, float(order.get("price") or order.get("ltp") or 0))
+        logging.info("PaperBroker order placed | order_id=%s | symbol=%s", order_id, order.get("symbol"))
+        return order
+
+    def modify_order(self, order_id, **changes):
+        order = self.state["orders"].get(order_id)
+        if not order or order.get("status") != "OPEN":
+            return None
+        order.update(changes)
+        order["modified_at"] = datetime.now()
+        logging.info("PaperBroker order modified | order_id=%s", order_id)
+        return order
+
+    def cancel_order(self, order_id):
+        order = self.state["orders"].get(order_id)
+        if order and order.get("status") == "OPEN":
+            order["status"] = "CANCELLED"
+            order["completed_at"] = datetime.now()
+            logging.info("PaperBroker order cancelled | order_id=%s", order_id)
+            return True
+        return False
+
+    def partial_exit(self, symbol: str, qty: int, price: float):
+        return self.place_order({"symbol": symbol, "side": "SELL", "qty": qty, "price": price, "order_type": "MARKET", "tag": "PARTIAL_EXIT"})
+
+    def _execute_order(self, order_id: str, price: float):
+        order = self.state["orders"][order_id]
+        qty = int(order.get("qty") or order.get("quantity") or 0)
+        symbol = order.get("symbol")
+        side = order.get("side", "BUY").upper()
+        if not symbol or qty <= 0 or price <= 0:
+            order["status"] = "REJECTED"
+            return order
+        pos = self.state["positions"].setdefault(symbol, {"symbol": symbol, "qty": 0, "avg_price": 0.0, "realized_pnl": 0.0})
+        if side == "BUY":
+            cost = qty * price
+            new_qty = pos["qty"] + qty
+            pos["avg_price"] = ((pos["avg_price"] * pos["qty"]) + cost) / new_qty
+            pos["qty"] = new_qty
+            self.state["cash"] -= cost
+        else:
+            exit_qty = min(qty, pos["qty"])
+            pnl = (price - pos["avg_price"]) * exit_qty
+            pos["qty"] -= exit_qty
+            pos["realized_pnl"] += pnl
+            self.state["realized_pnl"] += pnl
+            self.state["cash"] += exit_qty * price
+            if pos["qty"] == 0:
+                self.state["positions"].pop(symbol, None)
+        order.update({"status": "COMPLETE", "execution_price": price, "completed_at": datetime.now()})
+        self.state["trade_history"].append(order.copy())
+        self._update_risk()
+        return order
+
+    def mark_to_market(self, prices: dict[str, float]):
+        unrealized = 0.0
+        for sym, pos in self.state["positions"].items():
+            ltp = float(prices.get(sym, pos["avg_price"]))
+            pos["ltp"] = ltp
+            pos["unrealized_pnl"] = (ltp - pos["avg_price"]) * pos["qty"]
+            unrealized += pos["unrealized_pnl"]
+        self.state["unrealized_pnl"] = unrealized
+        self._update_risk()
+        return unrealized
+
+    def _update_risk(self):
+        exposure = sum(p["qty"] * p.get("ltp", p["avg_price"]) for p in self.state["positions"].values())
+        equity = self.state["cash"] + exposure
+        self.state["risk"] = {"exposure": exposure, "equity": equity, "open_positions": len(self.state["positions"])}
+
+    def positions(self): return list(self.state["positions"].values())
+    def holdings(self): return self.positions()
+    def orders(self): return list(self.state["orders"].values())
+    def funds(self): return {"cash": self.state["cash"], "realized_pnl": self.state.get("realized_pnl", 0.0), "unrealized_pnl": self.state.get("unrealized_pnl", 0.0)}
+    def margin(self): return self.state.get("risk", {})
 
 # ==========================================================
 # EXECUTION ENGINE (Paper / Simulation / future Live)
@@ -9398,8 +9871,8 @@ def show_mission_control():
     c3.metric("Candidates", len(st.session_state.get("trade_candidates", {})))
     c4.metric("Final Trades", len(st.session_state.get("selected_portfolio", [])))
 
-    tab_progress, tab_funnel, tab_trades, tab_learning, tab_portfolio = st.tabs([
-        "Live Progress", "Decision Funnel", "Final Trades", "Learning & Reviewer", "Portfolio"
+    tab_progress, tab_funnel, tab_trades, tab_learning, tab_portfolio, tab_health, tab_errors = st.tabs([
+        "Live Progress", "Decision Funnel", "Final Trades", "Learning & Reviewer", "Portfolio", "System Health", "Errors"
     ])
 
     with tab_progress:
@@ -9411,6 +9884,29 @@ def show_mission_control():
                 ]),
                 use_container_width=True,
             )
+        monitor = PipelineMonitor().update()
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Current Phase", monitor.get("current_phase", "IDLE"))
+        m2.metric("Completed", len(monitor.get("completed_phases", [])))
+        m3.metric("Failed", len(monitor.get("failed_phases", [])))
+        m4.metric("Runtime (sec)", monitor.get("pipeline_runtime", 0.0))
+        if monitor.get("estimated_completion"):
+            st.caption(f"Estimated completion: {monitor['estimated_completion'].strftime('%Y-%m-%d %H:%M:%S')}")
+        phases = st.session_state.get("pipeline_phases", {})
+        if phases:
+            phase_rows = []
+            for phase in phases.values():
+                phase_rows.append({
+                    "Phase": phase.phase_name,
+                    "Status": phase.status,
+                    "Progress %": phase.progress_percent,
+                    "Started": phase.started_at.strftime("%H:%M:%S") if phase.started_at else "",
+                    "Completed": phase.completed_at.strftime("%H:%M:%S") if phase.completed_at else "",
+                    "Duration": phase.duration,
+                    "Message": phase.message,
+                })
+                st.progress(int(phase.progress_percent), text=f"{phase.phase_name}: {phase.status}")
+            st.dataframe(pd.DataFrame(phase_rows), use_container_width=True)
         if st.session_state.get("pipeline_events"):
             st.dataframe(pd.DataFrame(st.session_state.pipeline_events), use_container_width=True)
         else:
@@ -9454,6 +9950,40 @@ def show_mission_control():
             st.dataframe(pdf, use_container_width=True)
         else:
             st.caption("No allocated portfolio positions from the latest run.")
+
+    with tab_health:
+        health = SystemHealthEngine().update()
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("CPU", "N/A" if health.get("cpu_percent") is None else f"{health['cpu_percent']}%")
+        h2.metric("Memory", "N/A" if health.get("memory_percent") is None else f"{health['memory_percent']}%")
+        h3.metric("Pipeline Runtime", health.get("pipeline_runtime", 0.0))
+        h4.metric("Startup Time", health.get("startup_time").strftime("%Y-%m-%d %H:%M:%S") if health.get("startup_time") else "")
+        st.dataframe(pd.DataFrame([
+            {"Area": "Broker Status", "Value": "Connected" if st.session_state.get("paper_broker", {}).get("connected") else "Disconnected"},
+            {"Area": "Live Data Status", "Value": f"{sum(len(v) for v in st.session_state.get('market_data_manager', {}).get('live_ticks', {}).values())} cached ticks"},
+            {"Area": "Historical Data Status", "Value": f"{len(st.session_state.get('market_data_manager', {}).get('history', {}))} cached symbols"},
+            {"Area": "Paper Trading Status", "Value": f"{len(st.session_state.get('paper_positions', {}))} open positions"},
+            {"Area": "Open Positions", "Value": len(st.session_state.get('paper_positions', {}))},
+            {"Area": "PnL", "Value": st.session_state.get('paper_broker', {}).get('realized_pnl', 0.0)},
+            {"Area": "Risk", "Value": st.session_state.get('paper_broker', {}).get('risk', {})},
+            {"Area": "Last Scan", "Value": health.get("last_scan")},
+            {"Area": "Last Strategy Run", "Value": health.get("last_strategy_run")},
+            {"Area": "Last Broker Sync", "Value": health.get("last_broker_sync")},
+            {"Area": "Last Live Tick", "Value": health.get("last_live_tick")},
+        ]), use_container_width=True)
+
+    with tab_errors:
+        errors = CentralErrorManager().get_errors()
+        if errors:
+            st.dataframe(pd.DataFrame([{
+                "Timestamp": e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "Phase": e.phase,
+                "Severity": e.severity,
+                "Message": e.message,
+                "Status": "Resolved" if e.resolved else "Open",
+            } for e in errors]), use_container_width=True)
+        else:
+            st.success("No pipeline errors recorded.")
 
 
 show_mission_control()
@@ -9824,6 +10354,115 @@ class YFinanceProvider(MarketDataProvider):
 
     def is_market_open(self, now=None):
         return is_market_open(now)
+
+
+
+
+class MarketDataManager:
+    session_key = "market_data_manager"
+    storage_dir = Path(_APP_DIR) / "data" / "market_cache"
+
+    def __init__(self, provider=None):
+        self.provider = provider or YFinanceProvider()
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        st.session_state.setdefault(self.session_key, {"history": {}, "live_ticks": {}, "status": {}, "last_persisted": None})
+
+    def _path(self, symbol: str, interval: str) -> Path:
+        return self.storage_dir / f"{symbol}_{interval}.csv"
+
+    def _load(self, symbol: str, interval: str):
+        path = self._path(symbol, interval)
+        if not path.exists():
+            return None
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        return df.sort_index()
+
+    def _save(self, symbol: str, interval: str, df):
+        if df is not None and not df.empty:
+            df.sort_index().to_csv(self._path(symbol, interval))
+            st.session_state[self.session_key]["last_persisted"] = datetime.now()
+
+    def get_history(self, symbols, interval="1d", period=None):
+        history = {}
+        missing = []
+        for symbol in symbols:
+            cached = self._load(symbol, interval)
+            if cached is None or cached.empty:
+                missing.append(symbol)
+            else:
+                history[symbol] = cached
+        if missing:
+            downloaded = self.provider.download_history(missing, interval, period or CONFIG.get("DOWNLOAD_PERIOD", "1y"))
+            for symbol, df in downloaded.items():
+                self._save(symbol, interval, df)
+                history[symbol] = df
+        st.session_state[self.session_key]["history"].update(history)
+        SystemHealthEngine().mark("last_scan")
+        logging.info("MarketDataManager history ready | symbols=%s | interval=%s", len(history), interval)
+        return history
+
+    def update_history(self, symbols, interval="1d"):
+        batch = self.provider.fetch_latest_batch(symbols, interval)
+        updated = {}
+        for symbol in symbols:
+            cached = self._load(symbol, interval)
+            incoming = batch.get(symbol)
+            if incoming is None or incoming.empty:
+                updated[symbol] = cached
+                continue
+            merged = incoming if cached is None or cached.empty else pd.concat([cached, incoming])
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            self._save(symbol, interval, merged)
+            updated[symbol] = merged
+        st.session_state[self.session_key]["history"].update({k: v for k, v in updated.items() if v is not None})
+        logging.info("MarketDataManager incremental update | symbols=%s | interval=%s", len(updated), interval)
+        return updated
+
+    def repair_history(self, symbols, interval="1d", period=None):
+        repaired = self.update_history(symbols, interval)
+        gaps = {}
+        for symbol, df in repaired.items():
+            if df is None or df.empty:
+                continue
+            freq = "B" if interval in ("1d", "1wk", "1mo") else None
+            if freq:
+                expected = pd.date_range(df.index.min().date(), df.index.max().date(), freq=freq)
+                missing = expected.difference(pd.DatetimeIndex(df.index).normalize())
+                if len(missing):
+                    gaps[symbol] = [d.strftime("%Y-%m-%d") for d in missing]
+        if gaps:
+            full = self.provider.download_history(list(gaps.keys()), interval, period or CONFIG.get("DOWNLOAD_PERIOD", "1y"))
+            for symbol, df in full.items():
+                self._save(symbol, interval, df)
+                repaired[symbol] = df
+        st.session_state[self.session_key]["status"] = {"gaps": gaps, "last_repair": datetime.now()}
+        logging.info("MarketDataManager repair complete | symbols=%s | gaps=%s", len(symbols), len(gaps))
+        return repaired
+
+    def store_live_tick(self, symbol: str, tick: dict[str, Any]):
+        ticks = st.session_state[self.session_key].setdefault("live_ticks", {}).setdefault(symbol, [])
+        tick = {**tick, "timestamp": tick.get("timestamp", datetime.now())}
+        ticks.append(tick)
+        SystemHealthEngine().mark("last_live_tick")
+        return tick
+
+    def get_live_data(self, symbol: str | None = None):
+        ticks = st.session_state[self.session_key].setdefault("live_ticks", {})
+        return ticks.get(symbol, []) if symbol else ticks
+
+    def ticks_to_candles(self, symbol: str, interval="1min"):
+        ticks = self.get_live_data(symbol)
+        if not ticks:
+            return pd.DataFrame()
+        df = pd.DataFrame(ticks)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.set_index("timestamp")
+        price = df["price"].astype(float)
+        return price.resample(interval).ohlc().dropna()
+
+    def recover_after_disconnect(self, symbols, interval="1d"):
+        logging.info("MarketDataManager broker reconnect recovery started")
+        return self.repair_history(symbols, interval)
 
 
 class LiveMarketCache:
