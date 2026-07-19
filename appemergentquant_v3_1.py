@@ -1787,6 +1787,7 @@ if _P("Scanner"):
     st.checkbox(
         "Long Only",
         value=True,
+        key="scan_manager_long_only",
         disabled=True,
         help="AlphaQuant is a long-only platform end-to-end -- there is no "
              "short-selling logic to disable.",
@@ -2024,8 +2025,8 @@ if _P("Developer Mode"):
 if _P("Developer Mode"):
     st.markdown('<div class="aq-panel-title">Download Engine & Performance</div>', unsafe_allow_html=True)
     d1, d2 = st.columns(2)
-    CONFIG["DOWNLOAD_BATCH"] = d1.slider("Batch size", 10, 100, CONFIG["DOWNLOAD_BATCH"], 10)
-    CONFIG["MAX_WORKERS"] = d2.slider("Parallel workers", 2, 16, CONFIG["MAX_WORKERS"])
+    CONFIG["DOWNLOAD_BATCH"] = d1.slider("Batch size", 10, 100, CONFIG["DOWNLOAD_BATCH"], 10, key="data_download_batch_size")
+    CONFIG["MAX_WORKERS"] = d2.slider("Parallel workers", 2, 16, CONFIG["MAX_WORKERS"], key="data_download_parallel_workers")
     st.caption("Diagnostics, provider status and pipeline tuning are isolated in Developer mode.")
 # =====================================================
 # INDICATOR ENGINE
@@ -3051,7 +3052,7 @@ if _P("AI"):
 
     st.subheader("Trade Candidate Engine")
 
-    if st.button("Show Trade Candidates"):
+    if st.button("Show Trade Candidates", key="developer_show_trade_candidates"):
 
         df=get_trade_candidates()
 
@@ -3114,7 +3115,7 @@ if _P("AI"):
         "Volume Profile and Demand/Supply Zones - feeding into AI Consensus."
     )
 
-    if st.button("Show Advanced Signals"):
+    if st.button("Show Advanced Signals", key="developer_show_advanced_signals"):
 
         signals_df = get_batch1_signals_dataframe()
 
@@ -3175,7 +3176,7 @@ if _P("AI"):
         "Earnings Filter - combined into the AI Confidence Engine feeding AI Consensus."
         )
 
-    if st.button("Show Batch 2 Signals"):
+    if st.button("Show Batch 2 Signals", key="developer_show_batch_2_signals"):
 
         b2_df = get_batch2_signals_dataframe()
 
@@ -9865,20 +9866,22 @@ def opportunity_filters():
     with st.expander("OPPORTUNITY FILTERS", expanded=False):
         a,b,c,d=st.columns(4)
         values={
-          "search":a.text_input("Search symbol",saved.get("search","")), "watchlist_only":b.toggle("Watchlist only",saved.get("watchlist_only",False)),
-          "exchange":c.selectbox("Exchange",["All","NSE","BSE"],index=["All","NSE","BSE"].index(saved.get("exchange","All"))),
-          "universe":d.selectbox("Index / universe",["All"]+SCAN_UNIVERSE_CHOICES,index=0),
-          "sector":a.selectbox("Sector",["All"]+sectors,index=0), "side":b.selectbox("BUY / SELL",["All","BUY","SELL"]),
-          "holding":c.selectbox("Holding period",["All","Intraday","Swing","Positional"]),
-          "minimum_confidence":d.slider("Minimum confidence",0,100,int(saved.get("minimum_confidence",0))),
-          "maximum_risk":a.selectbox("Maximum risk",["Any","LOW","MEDIUM","HIGH"]),
-          "minimum_return":b.number_input("Minimum expected return %",0.0,100.0,float(saved.get("minimum_return",0.0))),
-          "strategy":c.text_input("Strategy",saved.get("strategy","")),
-          "price_range":d.slider("Price range",0,100000,tuple(saved.get("price_range",[0,100000]))),
-          "volume_threshold":a.number_input("Volume threshold",0,int(1e9),int(saved.get("volume_threshold",0)),step=1000),
+          "search":a.text_input("Search symbol",saved.get("search",""),key="dashboard_opportunity_filters_search"), "watchlist_only":b.toggle("Watchlist only",saved.get("watchlist_only",False),key="dashboard_opportunity_filters_watchlist_only"),
+          "exchange":c.selectbox("Exchange",["All","NSE","BSE"],index=["All","NSE","BSE"].index(saved.get("exchange","All")),key="dashboard_opportunity_filters_exchange"),
+          "universe":d.selectbox("Index / universe",["All"]+SCAN_UNIVERSE_CHOICES,index=0,key="dashboard_opportunity_filters_universe"),
+          "sector":a.selectbox("Sector",["All"]+sectors,index=0,key="dashboard_opportunity_filters_sector"), "side":b.selectbox("BUY / SELL",["All","BUY","SELL"],key="dashboard_opportunity_filters_side"),
+          "holding":c.selectbox("Holding period",["All","Intraday","Swing","Positional"],key="dashboard_opportunity_filters_holding"),
+          "minimum_confidence":d.slider("Minimum confidence",0,100,int(saved.get("minimum_confidence",0)),key="dashboard_opportunity_filters_minimum_confidence"),
+          "maximum_risk":a.selectbox("Maximum risk",["Any","LOW","MEDIUM","HIGH"],key="dashboard_opportunity_filters_maximum_risk"),
+          "minimum_return":b.number_input("Minimum expected return %",0.0,100.0,float(saved.get("minimum_return",0.0)),key="dashboard_opportunity_filters_minimum_return"),
+          "strategy":c.text_input("Strategy",saved.get("strategy",""),key="dashboard_opportunity_filters_strategy"),
+          "price_range":d.slider("Price range",0,100000,tuple(saved.get("price_range",[0,100000])),key="dashboard_opportunity_filters_price_range"),
+          "volume_threshold":a.number_input("Volume threshold",0,int(1e9),int(saved.get("volume_threshold",0)),step=1000,key="dashboard_opportunity_filters_volume_threshold"),
         }
         x,y,z=st.columns(3)
-        apply=x.button("Apply Filters",type="primary",use_container_width=True); reset=y.button("Reset Filters",use_container_width=True); save=z.button("Save Filter Preset",use_container_width=True)
+        apply=x.button("Apply Filters",type="primary",use_container_width=True,key="dashboard_opportunity_filters_apply")
+        reset=y.button("Reset Filters",use_container_width=True,key="dashboard_opportunity_filters_reset")
+        save=z.button("Save Filter Preset",use_container_width=True,key="dashboard_opportunity_filters_save")
         if reset: values={}; WORKSPACE.save(filters={}); st.rerun()
         if apply or save: WORKSPACE.save(filters=values)
     return WORKSPACE.preferences.get("filters",saved)
@@ -9927,23 +9930,23 @@ def render_watchlist(full=False):
     st.markdown('<div class="aq-panel-title">Watchlist</div>',unsafe_allow_html=True)
     lists=WORKSPACE.preferences.get("watchlists",{"Default":st.session_state.get("watchlist",[])}) or {"Default":[]}; default=WORKSPACE.preferences.get("default_watchlist","Default")
     if default not in lists: default=next(iter(lists))
-    a,b,c=st.columns([2,2,1]); active=a.selectbox("Watchlist",list(lists),index=list(lists).index(default),label_visibility="collapsed"); symbol=b.text_input("Symbol",placeholder="ADD SYMBOL",label_visibility="collapsed").strip().upper().replace(".NS","");
-    if c.button("Add",use_container_width=True) and symbol:
+    a,b,c=st.columns([2,2,1]); active=a.selectbox("Watchlist",list(lists),index=list(lists).index(default),label_visibility="collapsed",key="watchlist_active_list"); symbol=b.text_input("Symbol",placeholder="ADD SYMBOL",label_visibility="collapsed",key="watchlist_add_symbol").strip().upper().replace(".NS","");
+    if c.button("Add",use_container_width=True,key="watchlist_add_button_route") and symbol:
         lists[active]=sorted(set(lists[active]+[symbol])); st.session_state.watchlist=lists[active]; WORKSPACE.save(watchlists=lists,default_watchlist=active); st.rerun()
     if full:
-        d,e,f=st.columns(3); rename=d.text_input("Rename watchlist",value=active); new=e.text_input("New watchlist"); make_default=f.button("Set default")
-        if rename!=active and rename and st.button("Rename"):
+        d,e,f=st.columns(3); rename=d.text_input("Rename watchlist",value=active,key="watchlist_rename_name"); new=e.text_input("New watchlist",key="watchlist_new_name"); make_default=f.button("Set default",key="watchlist_set_default")
+        if rename!=active and rename and st.button("Rename",key="watchlist_rename_button"):
             lists[rename]=lists.pop(active); WORKSPACE.save(watchlists=lists,default_watchlist=rename); st.rerun()
-        if new and st.button("Create watchlist"): lists.setdefault(new,[]); WORKSPACE.save(watchlists=lists); st.rerun()
+        if new and st.button("Create watchlist",key="watchlist_create_button"): lists.setdefault(new,[]); WORKSPACE.save(watchlists=lists); st.rerun()
         if make_default: WORKSPACE.save(default_watchlist=active)
     search=st.text_input("Search",key=f"watch_search_{full}",label_visibility="collapsed",placeholder="SEARCH WATCHLIST")
     symbols=sorted([x for x in lists[active] if search.upper() in x.upper()]); st.session_state.watchlist=lists[active]
     df=_watchlist_quotes(symbols)
     if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True,height=min(260,38+35*len(df)))
     if full and symbols:
-        remove=st.selectbox("Remove symbol",symbols)
-        if st.button("Remove"): lists[active].remove(remove); WORKSPACE.save(watchlists=lists); st.rerun()
-        selected=st.selectbox("Symbol details",symbols)
+        remove=st.selectbox("Remove symbol",symbols,key="watchlist_remove_symbol")
+        if st.button("Remove",key="watchlist_remove_button_route"): lists[active].remove(remove); WORKSPACE.save(watchlists=lists); st.rerun()
+        selected=st.selectbox("Symbol details",symbols,key="watchlist_symbol_details")
         if st.button("Open Symbol Details", key="open_symbol_details"):
             st.session_state.update(selected_symbol=selected, details_return_page="Watchlist", _page="Symbol Details")
             st.rerun()
@@ -10014,28 +10017,28 @@ def render_pre_run_universe_filters():
             placeholder="RELIANCE, TCS, INFY", key="prerun_custom_symbols",
             disabled=source != "Custom Universe" and mode != "Custom Universe")
         s1, s2, s3, s4 = st.columns(4)
-        minimum_price = s1.number_input("Minimum stock price", 0.0, value=float(saved.get("minimum_price", prefs.get("minimum_price", 20))))
-        maximum_price = s2.number_input("Maximum stock price", 0.0, value=float(saved.get("maximum_price", 20000)))
-        minimum_volume = s3.number_input("Minimum average daily volume", 0, value=int(saved.get("minimum_volume", prefs.get("minimum_volume", 100000))), step=1000)
-        minimum_turnover = s4.number_input("Minimum traded value", 0, value=int(saved.get("minimum_turnover", CONFIG["MIN_AVG_TURNOVER"])), step=100000)
+        minimum_price = s1.number_input("Minimum stock price", 0.0, value=float(saved.get("minimum_price", prefs.get("minimum_price", 20))), key="dashboard_universe_minimum_price")
+        maximum_price = s2.number_input("Maximum stock price", 0.0, value=float(saved.get("maximum_price", 20000)), key="dashboard_universe_maximum_price")
+        minimum_volume = s3.number_input("Minimum average daily volume", 0, value=int(saved.get("minimum_volume", prefs.get("minimum_volume", 100000))), step=1000, key="dashboard_universe_minimum_volume")
+        minimum_turnover = s4.number_input("Minimum traded value", 0, value=int(saved.get("minimum_turnover", CONFIG["MIN_AVG_TURNOVER"])), step=100000, key="dashboard_universe_minimum_turnover")
         t1, t2, t3, t4 = st.columns(4)
-        sector = t1.multiselect("Sector", sorted(set(STOCK_SECTOR_MAP.values())), default=saved.get("sector", []))
-        market_cap = t2.selectbox("Market-cap band", ["Any", "Large Cap", "Mid Cap", "Small Cap"], index=["Any", "Large Cap", "Mid Cap", "Small Cap"].index(saved.get("market_cap", "Any")))
-        exchange = t3.selectbox("Exchange", ["NSE"], help="The current universe engine is NSE-only.")
-        industry = t4.text_input("Industry", saved.get("industry", ""), help="Applied when instrument metadata is available.")
+        sector = t1.multiselect("Sector", sorted(set(STOCK_SECTOR_MAP.values())), default=saved.get("sector", []), key="dashboard_universe_sector")
+        market_cap = t2.selectbox("Market-cap band", ["Any", "Large Cap", "Mid Cap", "Small Cap"], index=["Any", "Large Cap", "Mid Cap", "Small Cap"].index(saved.get("market_cap", "Any")), key="dashboard_universe_market_cap")
+        exchange = t3.selectbox("Exchange", ["NSE"], help="The current universe engine is NSE-only.", key="dashboard_universe_exchange")
+        industry = t4.text_input("Industry", saved.get("industry", ""), help="Applied when instrument metadata is available.", key="dashboard_universe_industry")
         u1, u2, u3, u4 = st.columns(4)
-        fno_only = u1.toggle("F&O only", saved.get("fno_only", False))
-        exclude_etfs = u2.toggle("Exclude ETFs", saved.get("exclude_etfs", True))
-        exclude_sme = u3.toggle("Exclude SME", saved.get("exclude_sme", True))
-        exclude_illiquid = u4.toggle("Exclude illiquid/unavailable", saved.get("exclude_illiquid", True))
+        fno_only = u1.toggle("F&O only", saved.get("fno_only", False), key="dashboard_universe_fno_only")
+        exclude_etfs = u2.toggle("Exclude ETFs", saved.get("exclude_etfs", True), key="dashboard_universe_exclude_etfs")
+        exclude_sme = u3.toggle("Exclude SME", saved.get("exclude_sme", True), key="dashboard_universe_exclude_sme")
+        exclude_illiquid = u4.toggle("Exclude illiquid/unavailable", saved.get("exclude_illiquid", True), key="dashboard_universe_exclude_illiquid")
         v1, v2, v3, v4 = st.columns(4)
-        styles = v1.multiselect("Strategy horizon", ["Intraday", "Swing", "Positional"], default=saved.get("styles", ["Swing"]))
-        direction = v2.selectbox("Direction", ["Long only", "Short enabled"], index=1 if saved.get("short_enabled") else 0)
-        confidence = v3.slider("Minimum confidence", 0, 100, int(saved.get("minimum_confidence", prefs.get("minimum_confidence", 70))))
-        risk = v4.selectbox("Maximum risk rating", ["LOW", "MEDIUM", "HIGH"], index=["LOW", "MEDIUM", "HIGH"].index(saved.get("maximum_risk", "HIGH")))
-        expected = v1.number_input("Minimum expected return %", 0.0, 100.0, float(saved.get("minimum_return", 0.0)))
-        enabled = v2.multiselect("Enabled strategies", sorted(SCAN_STYLE_STRATEGY_MAP), default=saved.get("enabled_strategies", []))
-        watch_only = v3.toggle("Watchlist only", saved.get("watchlist_only", False))
+        styles = v1.multiselect("Strategy horizon", ["Intraday", "Swing", "Positional"], default=saved.get("styles", ["Swing"]), key="dashboard_universe_strategy_horizon")
+        direction = v2.selectbox("Direction", ["Long only", "Short enabled"], index=1 if saved.get("short_enabled") else 0, key="dashboard_universe_direction")
+        confidence = v3.slider("Minimum confidence", 0, 100, int(saved.get("minimum_confidence", prefs.get("minimum_confidence", 70))), key="dashboard_universe_minimum_confidence")
+        risk = v4.selectbox("Maximum risk rating", ["LOW", "MEDIUM", "HIGH"], index=["LOW", "MEDIUM", "HIGH"].index(saved.get("maximum_risk", "HIGH")), key="dashboard_universe_maximum_risk")
+        expected = v1.number_input("Minimum expected return %", 0.0, 100.0, float(saved.get("minimum_return", 0.0)), key="dashboard_universe_minimum_return")
+        enabled = v2.multiselect("Enabled strategies", sorted(SCAN_STYLE_STRATEGY_MAP), default=saved.get("enabled_strategies", []), key="dashboard_universe_enabled_strategies")
+        watch_only = v3.toggle("Watchlist only", saved.get("watchlist_only", False), key="dashboard_universe_watchlist_only")
         filters = {"custom_symbols": custom, "minimum_price": minimum_price, "maximum_price": maximum_price,
             "minimum_volume": minimum_volume, "minimum_turnover": minimum_turnover, "sector": sector,
             "market_cap": market_cap, "industry": industry, "exchange": exchange, "fno_only": fno_only,
@@ -10136,12 +10139,19 @@ def render_terminal_dashboard():
         st.error("LIVE MODE BLOCKED · Connect and test an authenticated broker with execution permission.")
     a,b,c,d=st.columns([2,1,1,1])
     blocked = not configured or (mode == "LIVE" and not live_ready)
-    run=a.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked)
-    if b.button("STOP",use_container_width=True): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED")
-    if c.button("EMERGENCY EXIT",use_container_width=True): st.session_state.update(emergency_exit_requested=True,autonomous_active=False,pipeline_state="BLOCKED"); st.error("Emergency exit requested; execution is halted pending confirmation.")
-    if d.button("REFRESH MARKET DATA",use_container_width=True): MarketDataManager().update_history(st.session_state.get("scan_universe",[]),prefs.get("candle_interval","1d")); st.rerun()
+    run=a.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked,key="dashboard_controls_run")
+    if b.button("STOP",use_container_width=True,key="dashboard_controls_stop"):
+        st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED")
+    if c.button("EMERGENCY EXIT",use_container_width=True,key="dashboard_controls_emergency_exit"):
+        st.session_state.update(emergency_exit_requested=True,autonomous_active=False,pipeline_state="BLOCKED")
+        st.error("Emergency exit requested; execution is halted pending confirmation.")
+    if d.button("REFRESH MARKET DATA",use_container_width=True,key="dashboard_controls_refresh_market_data"):
+        MarketDataManager().update_history(st.session_state.get("scan_universe",[]),prefs.get("candle_interval","1d"))
+        st.rerun()
     if run:
-        WORKSPACE.save(execution_mode=mode); st.session_state.update(alphaquant_run_pending=True,pipeline_state="RUNNING"); st.rerun()
+        WORKSPACE.save(execution_mode=mode)
+        st.session_state.update(alphaquant_run_pending=True,pipeline_state="RUNNING")
+        st.rerun()
     pipeline = st.session_state.get("pipeline_state", "STOPPED")
     ledger = _paper_ledger_metrics()
     cache_ready = MarketDataManager.storage_dir.exists() and any(MarketDataManager.storage_dir.glob("*.csv"))
@@ -10156,11 +10166,21 @@ def render_terminal_dashboard():
     st.markdown('<div class="aq-panel-title">System Readiness</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame(readiness,columns=["Component","State"]),use_container_width=True,hide_index=True)
     p1,p2=st.columns([1,2])
-    with p1: st.markdown('<div class="aq-panel-title">Market Overview</div>',unsafe_allow_html=True); st.metric("Market breadth",st.session_state.get("market_regime","NEUTRAL")); render_watchlist(False)
-    with p2: st.markdown('<div class="aq-panel-title">Portfolio Summary</div>',unsafe_allow_html=True); paper_portfolio_summary(); render_opportunities()
+    with p1:
+        st.markdown('<div class="aq-panel-title">Market Overview</div>',unsafe_allow_html=True)
+        st.metric("Market breadth",st.session_state.get("market_regime","NEUTRAL"))
+        render_watchlist(False)
+    with p2:
+        st.markdown('<div class="aq-panel-title">Portfolio Summary</div>',unsafe_allow_html=True)
+        paper_portfolio_summary()
+        render_opportunities()
     q1,q2=st.columns(2)
-    with q1: st.markdown('<div class="aq-panel-title">Open Positions</div>',unsafe_allow_html=True); st.dataframe(position_frame(),use_container_width=True,hide_index=True)
-    with q2: st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True); st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
+    with q1:
+        st.markdown('<div class="aq-panel-title">Open Positions</div>',unsafe_allow_html=True)
+        st.dataframe(position_frame(),use_container_width=True,hide_index=True)
+    with q2:
+        st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True)
+        st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
 
 # =====================================================
 # AUTONOMOUS TRADING LOOP
@@ -11318,26 +11338,26 @@ def render_profile():
     st.subheader("Profile / Trading Preferences")
     st.markdown('<div class="aq-panel-title">Capital and Execution Settings</div>',unsafe_allow_html=True)
     risk=dict(prefs.get("risk_preferences",{})); c1,c2=st.columns(2)
-    execution=c1.radio("Execution Mode",["PAPER","LIVE"],index=0 if prefs.get("execution_mode","PAPER")=="PAPER" else 1,horizontal=True)
-    capital=c2.number_input("Paper Trading Starting Capital (₹) · simulated",min_value=1.0,value=float(prefs["paper_trading_capital"]),step=10000.0)
-    risk_per=c1.number_input("Risk Per Trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1.0)))
-    daily=c2.number_input("Maximum Daily Loss (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3.0)))
-    maxpos=c1.number_input("Maximum Open Positions",1,100,int(prefs.get("maximum_positions",10)))
-    position=c2.number_input("Maximum Position Size (%)",0.01,100.0,float(risk.get("maximum_position_size",10.0)))
-    portfolio=c1.number_input("Maximum Portfolio Exposure (%)",0.01,100.0,float(risk.get("maximum_portfolio_exposure",80.0)))
-    sector=c2.number_input("Maximum Sector Exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25.0)))
-    reserve=c1.number_input("Minimum Cash Reserve (%)",0.0,99.99,float(risk.get("minimum_cash_reserve",20.0)))
+    execution=c1.radio("Execution Mode",["PAPER","LIVE"],index=0 if prefs.get("execution_mode","PAPER")=="PAPER" else 1,horizontal=True,key="profile_execution_mode")
+    capital=c2.number_input("Paper Trading Starting Capital (₹) · simulated",min_value=1.0,value=float(prefs["paper_trading_capital"]),step=10000.0,key="profile_paper_starting_capital")
+    risk_per=c1.number_input("Risk Per Trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1.0)),key="profile_risk_per_trade")
+    daily=c2.number_input("Maximum Daily Loss (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3.0)),key="profile_maximum_daily_loss")
+    maxpos=c1.number_input("Maximum Open Positions",1,100,int(prefs.get("maximum_positions",10)),key="profile_maximum_open_positions")
+    position=c2.number_input("Maximum Position Size (%)",0.01,100.0,float(risk.get("maximum_position_size",10.0)),key="profile_maximum_position_size")
+    portfolio=c1.number_input("Maximum Portfolio Exposure (%)",0.01,100.0,float(risk.get("maximum_portfolio_exposure",80.0)),key="profile_maximum_portfolio_exposure")
+    sector=c2.number_input("Maximum Sector Exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25.0)),key="profile_maximum_sector_exposure")
+    reserve=c1.number_input("Minimum Cash Reserve (%)",0.0,99.99,float(risk.get("minimum_cash_reserve",20.0)),key="profile_minimum_cash_reserve")
     changed=capital != float(prefs["paper_trading_capital"])
     has_trades=bool(st.session_state.get("paper_history") or st.session_state.get("paper_positions"))
     if changed and has_trades: st.warning("Existing paper trades detected. New capital will apply from the next clean session; historical P&L will not be rewritten.")
-    if st.button("Save Capital and Risk Settings",type="primary"):
+    if st.button("Save Capital and Risk Settings",type="primary",key="profile_save_capital_risk"):
         newrisk={"risk_per_trade":risk_per,"maximum_daily_loss":daily,"maximum_position_size":position,"maximum_portfolio_exposure":portfolio,"maximum_sector_exposure":sector,"minimum_cash_reserve":reserve}
         WORKSPACE.save(execution_mode=execution,maximum_positions=maxpos,risk_preferences=newrisk,paper_trading_capital=float(prefs["paper_trading_capital"]) if changed and has_trades else capital,paper_capital_pending=capital if changed and has_trades else None)
         if not has_trades: st.session_state.paper_capital=capital; st.session_state.paper_broker.update(cash=capital,starting_capital=capital)
         st.success("Settings saved." if not (changed and has_trades) else "Capital scheduled for the next paper-account reset.")
     st.markdown("#### Reset Paper Account")
     confirm=st.checkbox("I understand that open simulated positions will be closed and the current ledger archived.",key="confirm_paper_reset")
-    if st.button("Reset Paper Account",disabled=not confirm):
+    if st.button("Reset Paper Account",disabled=not confirm,key="profile_reset_paper_account"):
         archive=Path(_APP_DIR)/"data"/"paper_archives"; archive.mkdir(parents=True,exist_ok=True)
         snapshot={"archived_at":datetime.now().isoformat(),"ledger":st.session_state.get("paper_broker",{}),"history":[getattr(x,"__dict__",str(x)) for x in st.session_state.get("paper_history",[])],"positions":{k:getattr(v,"__dict__",str(v)) for k,v in st.session_state.get("paper_positions",{}).items()}}
         (archive/f"paper_account_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json").write_text(json.dumps(snapshot,default=str,indent=2))
@@ -11346,8 +11366,8 @@ def render_profile():
         st.session_state.paper_positions={}; st.session_state.paper_history=[]; st.session_state.paper_capital=amount
         st.success("Previous paper ledger archived and simulated account reset."); st.rerun()
     st.markdown('<div class="aq-panel-title">Display and Data Preferences</div>',unsafe_allow_html=True)
-    p1,p2=st.columns(2); history=p1.selectbox("History period",["6mo","1y","2y","5y"],index=["6mo","1y","2y","5y"].index(prefs["history_period"])); interval=p2.selectbox("Default candle interval",["1m","5m","15m","30m","1h","1d","1wk"],index=["1m","5m","15m","30m","1h","1d","1wk"].index(prefs["candle_interval"])); developer=p2.toggle("Enable Developer mode",value=bool(prefs["developer_mode"]))
-    if st.button("Save Display Preferences"): WORKSPACE.save(history_period=history,candle_interval=interval,developer_mode=developer); st.rerun()
+    p1,p2=st.columns(2); history=p1.selectbox("History period",["6mo","1y","2y","5y"],index=["6mo","1y","2y","5y"].index(prefs["history_period"]),key="profile_history_period"); interval=p2.selectbox("Default candle interval",["1m","5m","15m","30m","1h","1d","1wk"],index=["1m","5m","15m","30m","1h","1d","1wk"].index(prefs["candle_interval"]),key="profile_default_candle_interval"); developer=p2.toggle("Enable Developer mode",value=bool(prefs["developer_mode"]),key="profile_developer_mode")
+    if st.button("Save Display Preferences",key="profile_save_display_preferences"): WORKSPACE.save(history_period=history,candle_interval=interval,developer_mode=developer); st.rerun()
 
 
 def _extract_funds(payload):
@@ -11365,15 +11385,15 @@ def render_broker_manager():
     st.header("Broker Manager"); bcm=BrokerConfigManager(); profiles=st.session_state.setdefault("broker_profiles",bcm.load()); names=list(profiles)
     selected=st.selectbox("Broker Profile",names or ["New Profile"],key="broker_manager_selected")
     current=dict(profiles.get(selected,{"name":"default","broker_name":"Upstox","mode":"Paper","market_data_enabled":True,"execution_enabled":False,"auto_reconnect":True}))
-    a,b=st.columns(2); current["name"]=a.text_input("Profile Name",current.get("name","default")); brokers=["Upstox","Zerodha","Angel","Dhan","Fyers","Shoonya"]; current["broker_name"]=b.selectbox("Broker Name",brokers,index=brokers.index(current.get("broker_name")) if current.get("broker_name") in brokers else 0)
+    a,b=st.columns(2); current["name"]=a.text_input("Profile Name",current.get("name","default"),key="broker_profile_name"); brokers=["Upstox","Zerodha","Angel","Dhan","Fyers","Shoonya"]; current["broker_name"]=b.selectbox("Broker Name",brokers,index=brokers.index(current.get("broker_name")) if current.get("broker_name") in brokers else 0,key="broker_name")
     cols=st.columns(3)
     for i,key in enumerate(["api_key","api_secret","access_token","refresh_token","client_id","user_id","redirect_url","totp"]): current[key]=cols[i%3].text_input(key.replace("_"," ").title(),current.get(key,""),type="password" if key in {"api_secret","access_token","refresh_token","totp"} else "default",key=f"broker_{key}")
-    current["mode"]=st.radio("Trading Mode",["Paper","Live"],index=0 if current.get("mode")=="Paper" else 1,horizontal=True)
-    current["market_data_enabled"]=st.toggle("Live Market Data",bool(current.get("market_data_enabled",True))); current["execution_enabled"]=st.toggle("Execution Enabled",bool(current.get("execution_enabled",False)))
+    current["mode"]=st.radio("Trading Mode",["Paper","Live"],index=0 if current.get("mode")=="Paper" else 1,horizontal=True,key="broker_trading_mode")
+    current["market_data_enabled"]=st.toggle("Live Market Data",bool(current.get("market_data_enabled",True)),key="broker_live_market_data"); current["execution_enabled"]=st.toggle("Execution Enabled",bool(current.get("execution_enabled",False)),key="broker_execution_enabled")
     x,y,z=st.columns(3)
-    if x.button("Save Broker Profile"): bcm.save(current); st.success("Profile configured; it is not connected until a health test succeeds.")
-    if y.button("Disconnect"): bcm.disconnect(current.get("name")); st.session_state["broker_health"]={}; st.info("Disconnected")
-    if z.button("Test Connection",type="primary"):
+    if x.button("Save Broker Profile",key="broker_save_profile"): bcm.save(current); st.success("Profile configured; it is not connected until a health test succeeds.")
+    if y.button("Disconnect",key="broker_disconnect"): bcm.disconnect(current.get("name")); st.session_state["broker_health"]={}; st.info("Disconnected")
+    if z.button("Test Connection",type="primary",key="broker_test_connection"):
         started=time.perf_counter(); health={"configured":bool(current.get("api_key") or current.get("access_token")),"authenticated":False,"connected":False,"market_data_live":False,"execution_ready":False,"last_sync":datetime.now().isoformat(),"failures":[]}
         if current["mode"]=="Paper":
             health.update(configured=True,authenticated=True,connected=True,execution_ready=True); st.info("PAPER BROKER / SIMULATED — no external authentication or live broker funds.")
@@ -11409,7 +11429,7 @@ def dispatch_application():
     elif page=="Holdings": st.subheader("Holdings"); st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
     elif page=="Reports":
         st.subheader("Reports & Decision Audit"); frames={"Trade Report":get_final_trade_dataframe(),"P&L Report":pd.DataFrame([getattr(x,"__dict__",{}) for x in st.session_state.get("paper_history",[])]),"Position Report":position_frame(),"Holdings Report":holdings_frame()}
-        for name,df in frames.items(): st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode(),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv",disabled=df.empty)
+        for name,df in frames.items(): st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode(),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv",disabled=df.empty,key=f"reports_download_{name.lower().replace(' ','_')}")
     elif page=="Profile": render_profile()
     elif page=="Broker": render_broker_manager()
     elif page=="Symbol Details": render_symbol_details(st.session_state.get("selected_symbol"))
