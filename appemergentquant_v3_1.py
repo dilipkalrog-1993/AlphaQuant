@@ -86,162 +86,57 @@ st.set_page_config(
 #   * Unified professional dark theme (CSS injected exactly once)
 # =====================================================
 
-# -------- Global professional dark theme (injected exactly once) --------
-if not st.session_state.get("_theme_injected"):
-    st.markdown(
-        """
-        <style>
-        html, body, [class*="css"], .stApp {
-            background: linear-gradient(180deg, #0b1020 0%, #101731 100%) !important;
-            color: #e6e9f2 !important;
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif !important;
-        }
-        section[data-testid="stSidebar"] {
-            background: #0a0f1f !important;
-            border-right: 1px solid rgba(255,255,255,0.06);
-        }
-        section[data-testid="stSidebar"] * { color: #d7dbeb !important; }
-        div[data-testid="stMetric"] {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 10px;
-            padding: 14px 16px;
-        }
-        div[data-testid="stMetricLabel"] { color: #96a0c4 !important; font-size: 12px; }
-        div[data-testid="stMetricValue"] { color: #ffffff !important; font-weight: 600; }
-        div.stButton > button, div.stDownloadButton > button {
-            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
-            color: #ffffff !important;
-            border: 0 !important;
-            border-radius: 8px !important;
-            font-weight: 600 !important;
-            padding: 10px 22px !important;
-            transition: transform .08s ease, box-shadow .2s ease !important;
-        }
-        div.stButton > button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 8px 22px rgba(79,70,229,0.35) !important;
-        }
-        div.stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
-            font-size: 15px !important;
-            padding: 12px 28px !important;
-        }
-        div[data-baseweb="tab-list"] {
-            gap: 4px !important;
-            background: rgba(255,255,255,0.03);
-            padding: 6px !important;
-            border-radius: 10px !important;
-            border: 1px solid rgba(255,255,255,0.06);
-        }
-        button[data-baseweb="tab"] {
-            background: transparent !important;
-            color: #96a0c4 !important;
-            border-radius: 8px !important;
-            padding: 8px 18px !important;
-            font-weight: 500 !important;
-        }
-        button[data-baseweb="tab"][aria-selected="true"] {
-            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
-            color: #ffffff !important;
-        }
-        div[data-testid="stAlert"] {
-            border-radius: 10px !important;
-            border: 1px solid rgba(255,255,255,0.06) !important;
-        }
-        div[data-testid="stDataFrame"] thead tr th {
-            background: rgba(79,70,229,0.15) !important;
-            color: #e6e9f2 !important;
-            font-weight: 600 !important;
-        }
-        hr { border-color: rgba(255,255,255,0.08) !important; }
-        h1, h2, h3 { color: #ffffff !important; letter-spacing: -0.01em; }
-        div[data-testid="stExpander"] {
-            background: rgba(255,255,255,0.02);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 10px;
-        }
-        div[role="progressbar"] > div {
-            background: linear-gradient(90deg, #10b981 0%, #4f46e5 100%) !important;
-        }
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header[data-testid="stHeader"] { background: transparent; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.session_state["_theme_injected"] = True
+# -------- Stable institutional terminal theme (applied before visible UI) --------
+# This is deliberately unconditional: Streamlit rebuilds the DOM on every rerun.
+# A session-only injection flag caused widgets to fall back to the light theme after RUN.
+st.markdown("""
+<style>
+:root { color-scheme: dark; --aq-bg:#070b12; --aq-panel:#0d1420; --aq-line:#263142;
+ --aq-text:#d9e2ef; --aq-muted:#7f8da3; --aq-accent:#f2a900; --aq-green:#24c78e; --aq-red:#ef5b64; }
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background:#070b12 !important; color:var(--aq-text)!important; }
+[data-testid="stAppViewContainer"] > .main .block-container { max-width:100%!important; padding:2.7rem 1rem 1rem!important; }
+header[data-testid="stHeader"] { background:#070b12!important; height:2.25rem!important; }
+section[data-testid="stSidebar"] { display:none!important; }
+*, h1,h2,h3,p,label { font-family:Inter,Segoe UI,sans-serif!important; }
+h1 {font-size:1.25rem!important} h2 {font-size:1.05rem!important} h3 {font-size:.92rem!important}
+h1,h2,h3 {margin:.25rem 0!important;color:#eef4fc!important} p {margin:.15rem 0!important}
+[data-testid="stVerticalBlock"] {gap:.45rem!important}
+.aq-brand {display:flex;align-items:center;justify-content:space-between;border:1px solid var(--aq-line);border-left:3px solid var(--aq-accent);background:#0a101a;padding:6px 10px;margin-bottom:5px}
+.aq-brand b{font-size:14px;letter-spacing:.08em}.aq-brand span{font-size:10px;color:var(--aq-muted)}
+.aq-panel-title{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#aebbd0;border-bottom:1px solid var(--aq-line);padding:5px 7px;background:#111927}
+.aq-ticker{display:grid;grid-template-columns:repeat(6,minmax(125px,1fr));border:1px solid var(--aq-line);background:#0a1019;margin:3px 0}
+.aq-tick{padding:5px 8px;border-right:1px solid var(--aq-line);font-size:10px}.aq-tick:last-child{border:0}.aq-tick strong{display:block;color:#eef4fc;font-size:11px}.aq-up{color:var(--aq-green)}.aq-down{color:var(--aq-red)}
+.aq-status{display:flex;gap:16px;flex-wrap:wrap;background:#0d1420;border:1px solid var(--aq-line);padding:4px 8px;font-size:10px;color:var(--aq-muted)}
+div[data-testid="stMetric"]{background:var(--aq-panel)!important;border:1px solid var(--aq-line)!important;border-radius:2px!important;padding:6px 8px!important} [data-testid="stMetricLabel"]{font-size:10px!important;color:var(--aq-muted)!important}[data-testid="stMetricValue"]{font-size:16px!important;color:var(--aq-text)!important}
+.stButton button,.stDownloadButton button{min-height:30px!important;padding:3px 10px!important;border-radius:2px!important;border:1px solid #344258!important;background:#141d2b!important;color:var(--aq-text)!important;font-size:11px!important;font-weight:650!important;box-shadow:none!important}
+.stButton button:hover,.stDownloadButton button:hover{border-color:var(--aq-accent)!important;color:#fff!important}.stButton button[kind="primary"]{background:var(--aq-accent)!important;color:#080b10!important;border-color:var(--aq-accent)!important}
+[data-baseweb="input"],[data-baseweb="select"]>div,[data-testid="stNumberInput"] input{background:#0c1320!important;color:var(--aq-text)!important;border-color:var(--aq-line)!important;border-radius:2px!important}
+[data-testid="stDataFrame"], [data-testid="stTable"]{border:1px solid var(--aq-line)!important} [data-testid="stExpander"]{background:var(--aq-panel)!important;border:1px solid var(--aq-line)!important;border-radius:2px!important}
+[data-baseweb="tab-list"]{background:#0a1019!important;border-bottom:1px solid var(--aq-line)!important;gap:0!important}[data-baseweb="tab"]{padding:5px 12px!important;color:var(--aq-muted)!important}[data-baseweb="tab"][aria-selected="true"]{color:var(--aq-accent)!important;border-bottom-color:var(--aq-accent)!important}
+hr{margin:.35rem 0!important;border-color:var(--aq-line)!important} #MainMenu,footer{visibility:hidden}
+@media(max-width:900px){.aq-ticker{grid-template-columns:repeat(2,1fr)}[data-testid="column"]{min-width:100%!important}}
+</style>
+""", unsafe_allow_html=True)
 
-# -------- Top navigation banner --------
-st.markdown(
-    """
-    <div style="
-        display:flex; align-items:center; justify-content:space-between;
-        background: linear-gradient(90deg, rgba(79,70,229,0.20) 0%, rgba(124,58,237,0.15) 100%);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 14px; padding: 14px 20px; margin: 4px 0 18px 0;
-    ">
-      <div style="display:flex; align-items:center; gap:12px;">
-        <div style="width:36px; height:36px; border-radius:9px;
-             background: linear-gradient(135deg,#4f46e5,#7c3aed);
-             display:flex; align-items:center; justify-content:center;
-             font-weight:800; color:#fff; font-size:18px;">Q</div>
-        <div>
-          <div style="font-size:18px; font-weight:700; color:#fff; letter-spacing:-0.02em;">
-             AlphaQuant Professional
-          </div>
-          <div style="font-size:11px; color:#96a0c4; letter-spacing:0.08em; text-transform:uppercase;">
-             Autonomous NSE Trading Platform &middot; One-Click Pipeline &middot; v3.0.2
-          </div>
-        </div>
-      </div>
-      <div style="display:flex; gap:10px; font-size:12px; color:#96a0c4;">
-        <span>&bull; Universe Engine: nsearchives</span>
-        <span style="opacity:0.6;">&middot;</span>
-        <span>&bull; Pipeline: One-Click</span>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown('<div class="aq-brand"><b>ALPHAQUANT TERMINAL</b><span>MARKETS · RESEARCH · EXECUTION · RISK</span></div>', unsafe_allow_html=True)
 
-# =====================================================
-# PROFESSIONAL WORKSPACE ROUTER
-# =====================================================
-# Sets st.session_state["_page"] via a top nav bar. Every major UI block
-# further down the file is gated by _P("PageName") so only the currently
-# active page renders. This gives the user the requested clean navigation
-# (Dashboard / Scanner / AI / Portfolio / Paper Trading / Settings) while
-# every engine still runs at import so the one-click pipeline behaviour
-# is preserved.
-
-_PAGE_LIST = ["Dashboard", "Profile", "Broker Manager", "Reports", "Developer Mode"]
-_PAGE_ICONS = {"Dashboard": "▣", "Profile": "●", "Broker Manager": "⇄",
-               "Reports": "≡", "Developer Mode": "⌘"}
-
-if "_page" not in st.session_state:
+# Compact top navigation. Developer is absent until explicitly enabled in Profile.
+_BASE_PAGES = ["Dashboard", "Watchlist", "Positions", "Holdings", "Reports", "Profile", "Broker"]
+_developer_enabled = bool(st.session_state.get("workspace_preferences", {}).get("developer_mode", False))
+_PAGE_LIST = _BASE_PAGES + (["Developer"] if _developer_enabled else [])
+if st.session_state.get("_page") not in _PAGE_LIST:
     st.session_state["_page"] = "Dashboard"
-
-_nav_cols = st.columns(len(_PAGE_LIST))
+_nav_cols = st.columns([1] * len(_BASE_PAGES) + ([.8] if _developer_enabled else []))
 for _i, _pname in enumerate(_PAGE_LIST):
-    _is_active = st.session_state["_page"] == _pname
     with _nav_cols[_i]:
-        if st.button(
-            f"{_PAGE_ICONS[_pname]}  {_pname}",
-            key=f"_nav_btn_{_pname}",
-            use_container_width=True,
-            type="primary" if _is_active else "secondary",
-        ):
+        if st.button(_pname.upper(), key=f"_nav_btn_{_pname}", use_container_width=True,
+                     type="primary" if st.session_state["_page"] == _pname else "secondary"):
             st.session_state["_page"] = _pname
             st.rerun()
 
 def _P(*pages) -> bool:
-    """True when the current page matches any of the given page names."""
-    return st.session_state.get("_page", "Dashboard") in pages
-
-st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
-
+    aliases = {"Broker Manager":"Broker", "Developer Mode":"Developer"}
+    return st.session_state.get("_page", "Dashboard") in {aliases.get(p,p) for p in pages}
 
 # =====================================================
 # APPLICATION CONFIGURATION
@@ -287,10 +182,18 @@ class WorkspaceManager:
     are deliberately excluded from this store.
     """
 
-    VERSION = 1
+    VERSION = 2
     STORAGE_PATH = Path(_APP_DIR) / "data" / "workspace.json"
     DEFAULTS = {
         "watchlist": [],
+        "watchlists": {"Default": []},
+        "default_watchlist": "Default",
+        "history_period": "1y",
+        "candle_interval": "1d",
+        "minimum_price": 20,
+        "minimum_volume": 100000,
+        "maximum_positions": 10,
+        "theme": "terminal-dark",
         "dashboard_density": "Compact",
         "opportunity_limit": 8,
         "minimum_confidence": 70,
@@ -312,7 +215,7 @@ class WorkspaceManager:
         if self.STORAGE_PATH.exists():
             try:
                 payload = json.loads(self.STORAGE_PATH.read_text(encoding="utf-8"))
-                if payload.get("version") == self.VERSION:
+                if isinstance(payload.get("preferences"), dict):
                     saved = payload.get("preferences", {})
             except (OSError, ValueError, TypeError) as exc:
                 logging.warning("Workspace preferences could not be loaded: %s", exc)
@@ -331,6 +234,12 @@ class WorkspaceManager:
 
 
 WORKSPACE = WorkspaceManager()
+_wp = WORKSPACE.preferences
+CONFIG.update({
+    "DOWNLOAD_PERIOD": _wp["history_period"], "DOWNLOAD_INTERVAL": _wp["candle_interval"],
+    "MIN_PRICE": _wp["minimum_price"], "MIN_AVG_VOLUME": _wp["minimum_volume"],
+    "MAX_OPEN_POSITIONS": _wp["maximum_positions"],
+})
 
 # =====================================================
 # SECTOR MAP
@@ -696,32 +605,6 @@ class PipelineDiagnostics:
             f"{total - unhealthy}/{total} startup checks passed",
             {"total": total, "unhealthy": unhealthy},
         )
-
-
-# =====================================================
-# HEADER
-# =====================================================
-
-if _P("Dashboard"):
-    st.title("AlphaQuant Trading Workspace")
-    st.caption("AI-assisted execution, risk and portfolio control")
-
-# =====================================================
-# DASHBOARD
-# =====================================================
-
-if _P("Dashboard"):
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric("Version", CONFIG["VERSION"])
-
-    c2.metric("Scan Mode", "Entire NSE")
-
-    c3.metric("Strategy", "Long Only")
-
-    c4.metric("Status", "Ready")
-
-    st.divider()
 
 
 # =====================================================
@@ -1438,10 +1321,11 @@ def _clean_and_suffix_symbols(base_symbols: Iterable[str]) -> list[str]:
 
 ALL_SYMBOLS = fetch_complete_nse_universe()
 
-if len(ALL_SYMBOLS) == 0:
-    st.error("Universe Loading Failed")
-else:
-    st.success(f"Universe Loaded : {len(ALL_SYMBOLS)} Stocks")
+if _P("Developer Mode"):
+    if len(ALL_SYMBOLS) == 0:
+        st.error("Universe loading failed")
+    else:
+        st.success(f"Universe loaded: {len(ALL_SYMBOLS)} stocks")
 
 if _P("Scanner"):
     with st.expander("Universe Preview"):
@@ -2071,62 +1955,16 @@ if _P("Developer Mode"):
     else:
         st.info("No market data loaded yet.")
 # =====================================================
-# CONFIGURATION SIDEBAR
-# VERSION 2.1D
+# CONFIGURATION CONTROLS
+# User preferences render in Profile; engineering tuning renders only in Developer.
+# No normal-workspace sidebar is created.
 # =====================================================
-
-st.sidebar.title("⚙ AlphaQuant Settings")
-
-CONFIG["DOWNLOAD_PERIOD"] = st.sidebar.selectbox(
-    "History",
-    ["6mo", "1y", "2y", "5y"],
-    index=1
-)
-
-CONFIG["DOWNLOAD_INTERVAL"] = st.sidebar.selectbox(
-    "Interval",
-    ["1d", "1wk"],
-    index=0
-)
-
-CONFIG["DOWNLOAD_BATCH"] = st.sidebar.slider(
-    "Batch Size",
-    min_value=10,
-    max_value=100,
-    value=CONFIG["DOWNLOAD_BATCH"],
-    step=10
-)
-
-CONFIG["MAX_WORKERS"] = st.sidebar.slider(
-    "Parallel Workers",
-    min_value=2,
-    max_value=16,
-    value=CONFIG["MAX_WORKERS"]
-)
-
-CONFIG["MIN_PRICE"] = st.sidebar.number_input(
-    "Minimum Stock Price (₹)",
-    min_value=1,
-    value=CONFIG["MIN_PRICE"]
-)
-
-CONFIG["MIN_AVG_VOLUME"] = st.sidebar.number_input(
-    "Minimum Average Daily Volume",
-    min_value=1000,
-    value=CONFIG["MIN_AVG_VOLUME"],
-    step=1000
-)
-
-CONFIG["MAX_OPEN_POSITIONS"] = st.sidebar.slider(
-    "Maximum Open Positions",
-    min_value=1,
-    max_value=20,
-    value=CONFIG["MAX_OPEN_POSITIONS"]
-)
-
-st.sidebar.markdown("---")
-
-st.sidebar.success("Configuration Loaded")
+if _P("Developer Mode"):
+    st.markdown('<div class="aq-panel-title">Download Engine & Performance</div>', unsafe_allow_html=True)
+    d1, d2 = st.columns(2)
+    CONFIG["DOWNLOAD_BATCH"] = d1.slider("Batch size", 10, 100, CONFIG["DOWNLOAD_BATCH"], 10)
+    CONFIG["MAX_WORKERS"] = d2.slider("Parallel workers", 2, 16, CONFIG["MAX_WORKERS"])
+    st.caption("Diagnostics, provider status and pipeline tuning are isolated in Developer mode.")
 # =====================================================
 # INDICATOR ENGINE
 # VERSION 2.2A
@@ -2498,7 +2336,8 @@ def get_stock(symbol):
     return st.session_state.stock_objects[symbol]
 
 
-st.sidebar.success("Stock Intelligence Engine Loaded")
+if _P("Developer Mode"):
+    st.success("Stock Intelligence Engine loaded")
 # =====================================================
 # TRADE QUALITY ENGINE
 # VERSION 2.2C
@@ -4144,9 +3983,6 @@ def legacy_run_complete_scan():
 # SCAN BUTTON
 # =====================================================
 
-if _P("Dashboard"):
-    st.divider()
-    st.subheader("Trading Control")
 
 
 def _pipeline_event(event):
@@ -4268,14 +4104,6 @@ def run_automated_cycle(trigger="AUTONOMOUS"):
     return run_alphaquant(trigger=trigger)
 
 
-if _P("Dashboard") and st.button(
-    "RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary",
-    use_container_width=True,
-):
-    # Execution is intentionally deferred until the end of this file.  Some
-    # preserved provider classes are declared below the UI; invoking here used
-    # to produce a NameError on a user's first click.
-    st.session_state["alphaquant_run_pending"] = True
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -9913,6 +9741,189 @@ def show_mission_control():
 if _P("Developer Mode"):
     show_mission_control()
 
+
+# =====================================================
+# COMPACT TERMINAL WORKSPACES
+# =====================================================
+_INDEX_TICKERS = {
+    "NIFTY 50": "^NSEI", "BANK NIFTY": "^NSEBANK", "FINNIFTY": "NIFTY_FIN_SERVICE.NS",
+    "NIFTY MIDCAP": "^NSEMDCP50", "NIFTY SMALLCAP": "^CNXSC", "INDIA VIX": "^INDIAVIX",
+}
+
+def _quote_from_frame(df):
+    if df is None or df.empty or "Close" not in df: return None
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+    if len(close) < 1: return None
+    value=float(close.iloc[-1]); previous=float(close.iloc[-2]) if len(close)>1 else value
+    change=value-previous
+    return {"value":value,"change":change,"pct":change/previous*100 if previous else 0.0}
+
+def refresh_terminal_quotes(force=False):
+    if st.session_state.get("terminal_quotes") and not force:
+        return st.session_state.terminal_quotes
+    quotes={}; source="Historical provider (yfinance fallback)"
+    try:
+        raw=yf.download(list(_INDEX_TICKERS.values()), period="5d", interval="1d", group_by="ticker", progress=False, threads=True, auto_adjust=False)
+        for name,ticker in _INDEX_TICKERS.items():
+            frame = raw[ticker] if isinstance(raw.columns,pd.MultiIndex) and ticker in raw.columns.get_level_values(0) else raw
+            q=_quote_from_frame(frame)
+            if q: quotes[name]=q
+    except Exception as exc:
+        logging.warning("Terminal index strip refresh failed: %s", exc)
+    st.session_state.terminal_quotes=quotes
+    st.session_state.terminal_quote_time=datetime.now()
+    st.session_state.terminal_quote_source=source
+    return quotes
+
+def render_ticker_strip():
+    quotes=refresh_terminal_quotes(False); stamp=st.session_state.get("terminal_quote_time",datetime.now()).strftime("%H:%M:%S")
+    cells=[]
+    for name in _INDEX_TICKERS:
+        q=quotes.get(name); value=f"{q['value']:,.2f}" if q else "—"; change=q["change"] if q else 0; pct=q["pct"] if q else 0
+        cls="aq-up" if change>=0 else "aq-down"
+        cells.append(f'<div class="aq-tick"><strong>{name}</strong>{value} <span class="{cls}">{change:+.2f} ({pct:+.2f}%)</span><br><small>{stamp}</small></div>')
+    st.markdown('<div class="aq-ticker">'+''.join(cells)+'</div>',unsafe_allow_html=True)
+    now=datetime.now(ZoneInfo("Asia/Kolkata")); opened=is_market_open(now)
+    advances=sum(1 for q in quotes.values() if q["change"]>0); declines=sum(1 for q in quotes.values() if q["change"]<0)
+    breadth="POSITIVE" if advances>declines else "NEGATIVE" if declines>advances else "NEUTRAL"
+    regime=st.session_state.get("market_regime",breadth)
+    live=st.session_state.get("active_broker_client") is not None
+    st.markdown(f'<div class="aq-status"><b class="{"aq-up" if opened else "aq-down"}">MARKET {"OPEN" if opened else "CLOSED"}</b><span>A/D {advances}/{declines}</span><span>BREADTH {breadth}</span><span>REGIME {regime}</span><span>BROKER {"CONNECTED" if live else "OFFLINE"}</span><span>SOURCE {st.session_state.get("terminal_quote_source","fallback provider")}</span></div>',unsafe_allow_html=True)
+
+def _trade_row(t):
+    entry=float(getattr(t,"entry",0) or 0); target=float(getattr(t,"target1",0) or 0)
+    return {"Symbol":getattr(t,"symbol",""),"Side":getattr(t,"side","BUY"),"Entry":entry,"CMP":getattr(t,"current_price",entry),"Stop Loss":getattr(t,"stop",0),"Target 1":target,"Target 2":getattr(t,"target2",0),"Expected Return %":round((target-entry)/entry*100,2) if entry else 0,"Confidence":getattr(t,"confidence",getattr(t,"ai_confidence",0)),"Risk":(getattr(t,"risk_verdict",{}) or {}).get("verdict","PENDING"),"Position Size":getattr(t,"quantity",getattr(t,"capital_required",0)),"Holding Period":getattr(t,"holding_period","Swing"),"Strategy":getattr(t,"strategy",""),"Action":"Why?"}
+
+def opportunity_filters():
+    saved=WORKSPACE.preferences.get("filters",{}); sectors=sorted(set(STOCK_SECTOR_MAP.values()))
+    with st.expander("OPPORTUNITY FILTERS", expanded=False):
+        a,b,c,d=st.columns(4)
+        values={
+          "search":a.text_input("Search symbol",saved.get("search","")), "watchlist_only":b.toggle("Watchlist only",saved.get("watchlist_only",False)),
+          "exchange":c.selectbox("Exchange",["All","NSE","BSE"],index=["All","NSE","BSE"].index(saved.get("exchange","All"))),
+          "universe":d.selectbox("Index / universe",["All"]+SCAN_UNIVERSE_CHOICES,index=0),
+          "sector":a.selectbox("Sector",["All"]+sectors,index=0), "side":b.selectbox("BUY / SELL",["All","BUY","SELL"]),
+          "holding":c.selectbox("Holding period",["All","Intraday","Swing","Positional"]),
+          "minimum_confidence":d.slider("Minimum confidence",0,100,int(saved.get("minimum_confidence",0))),
+          "maximum_risk":a.selectbox("Maximum risk",["Any","LOW","MEDIUM","HIGH"]),
+          "minimum_return":b.number_input("Minimum expected return %",0.0,100.0,float(saved.get("minimum_return",0.0))),
+          "strategy":c.text_input("Strategy",saved.get("strategy","")),
+          "price_range":d.slider("Price range",0,100000,tuple(saved.get("price_range",[0,100000]))),
+          "volume_threshold":a.number_input("Volume threshold",0,int(1e9),int(saved.get("volume_threshold",0)),step=1000),
+        }
+        x,y,z=st.columns(3)
+        apply=x.button("Apply Filters",type="primary",use_container_width=True); reset=y.button("Reset Filters",use_container_width=True); save=z.button("Save Filter Preset",use_container_width=True)
+        if reset: values={}; WORKSPACE.save(filters={}); st.rerun()
+        if apply or save: WORKSPACE.save(filters=values)
+    return WORKSPACE.preferences.get("filters",saved)
+
+def filtered_opportunities(filters):
+    rows=[_trade_row(t) for t in st.session_state.get("final_trade_list",[])]
+    watch=set(st.session_state.get("watchlist",[])); out=[]
+    for row in rows:
+        symbol=str(row["Symbol"]).replace(".NS","")
+        if filters.get("search") and filters["search"].upper() not in symbol.upper(): continue
+        if filters.get("watchlist_only") and symbol not in watch: continue
+        if filters.get("side") not in (None,"All",row["Side"]): continue
+        if float(row["Confidence"] or 0)<float(filters.get("minimum_confidence",0)): continue
+        if float(row["Expected Return %"] or 0)<float(filters.get("minimum_return",0)): continue
+        if filters.get("strategy") and filters["strategy"].lower() not in str(row["Strategy"]).lower(): continue
+        lo,hi=filters.get("price_range",[0,100000])
+        if not lo<=float(row["CMP"] or 0)<=hi: continue
+        if filters.get("sector") not in (None,"All",STOCK_SECTOR_MAP.get(symbol,"UNKNOWN")): continue
+        out.append(row)
+    return pd.DataFrame(out)
+
+def render_opportunities():
+    st.markdown('<div class="aq-panel-title">Trade Opportunities</div>',unsafe_allow_html=True)
+    filters=opportunity_filters(); df=filtered_opportunities(filters)
+    if df.empty: st.caption("No opportunities match the active filters.")
+    else: st.dataframe(df,use_container_width=True,hide_index=True,height=min(300,38+35*len(df)))
+    trades=st.session_state.get("final_trade_list",[])
+    if trades:
+        selected=st.selectbox("Why?",[getattr(t,"symbol","") for t in trades],key="why_trade")
+        trade=next(t for t in trades if getattr(t,"symbol","")==selected); verdict=getattr(trade,"risk_verdict",{}) or {}; reasons=getattr(trade,"reasons",[]) or []
+        with st.expander(f"Decision rationale · {selected}"):
+            labels=["Technical reason","Volume reason","Trend reason","Momentum reason","Sector reason","Market-regime reason","AI reason","Risk result","Portfolio-allocation result","News / sentiment factor","Final decision rationale"]
+            for i,label in enumerate(labels): st.write(f"**{label}:** {reasons[i] if i<len(reasons) else verdict.get('reason','No adverse factor recorded by the active engines.')}")
+
+def _watchlist_quotes(symbols):
+    rows=[]
+    for symbol in symbols:
+        df=st.session_state.get("market_data",{}).get(symbol)
+        if not isinstance(df, pd.DataFrame):
+            df=st.session_state.get("market_data",{}).get(symbol+".NS")
+        q=_quote_from_frame(df) if isinstance(df,pd.DataFrame) else None
+        rows.append({"Symbol":symbol,"LTP":q["value"] if q else None,"Change":q["change"] if q else None,"Change %":q["pct"] if q else None,"Volume":float(df["Volume"].iloc[-1]) if isinstance(df,pd.DataFrame) and not df.empty and "Volume" in df else None,"Day High":float(df["High"].iloc[-1]) if isinstance(df,pd.DataFrame) and not df.empty and "High" in df else None,"Day Low":float(df["Low"].iloc[-1]) if isinstance(df,pd.DataFrame) and not df.empty and "Low" in df else None,"Signal":"WATCH","Alert":"●" if symbol in {str(getattr(t,'symbol','')).replace('.NS','') for t in st.session_state.get('final_trade_list',[])} else ""})
+    return pd.DataFrame(rows)
+
+def render_watchlist(full=False):
+    st.markdown('<div class="aq-panel-title">Watchlist</div>',unsafe_allow_html=True)
+    lists=WORKSPACE.preferences.get("watchlists",{"Default":st.session_state.get("watchlist",[])}) or {"Default":[]}; default=WORKSPACE.preferences.get("default_watchlist","Default")
+    if default not in lists: default=next(iter(lists))
+    a,b,c=st.columns([2,2,1]); active=a.selectbox("Watchlist",list(lists),index=list(lists).index(default),label_visibility="collapsed"); symbol=b.text_input("Symbol",placeholder="ADD SYMBOL",label_visibility="collapsed").strip().upper().replace(".NS","");
+    if c.button("Add",use_container_width=True) and symbol:
+        lists[active]=sorted(set(lists[active]+[symbol])); st.session_state.watchlist=lists[active]; WORKSPACE.save(watchlists=lists,default_watchlist=active); st.rerun()
+    if full:
+        d,e,f=st.columns(3); rename=d.text_input("Rename watchlist",value=active); new=e.text_input("New watchlist"); make_default=f.button("Set default")
+        if rename!=active and rename and st.button("Rename"):
+            lists[rename]=lists.pop(active); WORKSPACE.save(watchlists=lists,default_watchlist=rename); st.rerun()
+        if new and st.button("Create watchlist"): lists.setdefault(new,[]); WORKSPACE.save(watchlists=lists); st.rerun()
+        if make_default: WORKSPACE.save(default_watchlist=active)
+    search=st.text_input("Search",key=f"watch_search_{full}",label_visibility="collapsed",placeholder="SEARCH WATCHLIST")
+    symbols=sorted([x for x in lists[active] if search.upper() in x.upper()]); st.session_state.watchlist=lists[active]
+    df=_watchlist_quotes(symbols)
+    if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True,height=min(260,38+35*len(df)))
+    if full and symbols:
+        remove=st.selectbox("Remove symbol",symbols)
+        if st.button("Remove"): lists[active].remove(remove); WORKSPACE.save(watchlists=lists); st.rerun()
+        selected=st.selectbox("Symbol details",symbols); data=st.session_state.get("market_data",{}).get(selected+".NS")
+        with st.expander(f"{selected} · AlphaQuant view",expanded=True):
+            if isinstance(data,pd.DataFrame) and not data.empty:
+                st.line_chart(data[["Close"]].tail(90)); st.dataframe(data.tail(10),use_container_width=True)
+            st.write("**Strategy signal:**",next((getattr(t,"strategy","WATCH") for t in st.session_state.get("final_trade_list",[]) if selected in getattr(t,"symbol","")),"WATCH"))
+            st.caption("Signal reason and relevant news appear when supplied by the strategy and news engines.")
+
+def position_frame():
+    rows=[]
+    for p in st.session_state.get("paper_positions",{}).values():
+        entry=float(getattr(p,"entry",0) or 0); cmp=float(getattr(p,"current_price",entry) or entry); qty=getattr(p,"quantity",getattr(p,"qty",0)); pnl=(cmp-entry)*qty
+        rows.append({"Symbol":p.symbol,"Quantity":qty,"Entry":entry,"CMP":cmp,"Live P&L":pnl,"P&L %":(cmp-entry)/entry*100 if entry else 0,"Stop":getattr(p,"stop",0),"Target":getattr(p,"target1",0),"Trailing Stop":getattr(p,"trailing_stop",0),"Holding Time":str(datetime.now()-getattr(p,"entry_time",datetime.now())).split('.')[0],"Current Recommendation":"HOLD","Reason":"Risk controls active","Exit Action":"Exit"})
+    return pd.DataFrame(rows)
+
+def holdings_frame():
+    rows=[]
+    holdings=st.session_state.get("holdings",[]) or []
+    if isinstance(holdings,dict): holdings=holdings.values()
+    for h in holdings:
+        get=lambda k,d=0: h.get(k,d) if isinstance(h,dict) else getattr(h,k,d); qty=get("quantity",get("qty",0)); avg=float(get("average_cost",get("entry",0)) or 0); cmp=float(get("current_price",avg) or avg)
+        rows.append({"Symbol":get("symbol",""),"Quantity":qty,"Average Cost":avg,"CMP":cmp,"Invested Value":avg*qty,"Current Value":cmp*qty,"Unrealized P&L":(cmp-avg)*qty,"Allocation":get("allocation",0),"Confidence":get("confidence",0),"Why Still Holding":get("reason","Thesis intact"),"Exit Condition":get("exit_condition","Risk or target trigger")})
+    return pd.DataFrame(rows)
+
+def render_terminal_dashboard():
+    render_ticker_strip()
+    mode=st.radio("Execution mode",["PAPER","LIVE"],horizontal=True,key="execution_mode",help="Paper uses the built-in simulation broker; Live requires an authenticated broker.")
+    live_connected=st.session_state.get("active_broker_client") is not None
+    if mode=="LIVE" and not live_connected:
+        st.error("LIVE MODE BLOCKED · A linked, authenticated broker connection is required.")
+        if st.button("Connect Broker",type="primary"): st.session_state._page="Broker"; st.rerun()
+    a,b,c,d=st.columns([2,1,1,1])
+    run=a.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=mode=="LIVE" and not live_connected)
+    if b.button("STOP",use_container_width=True): st.session_state["autonomous_enabled"]=False; st.session_state["stop_requested"]=True
+    if c.button("EMERGENCY EXIT",use_container_width=True): st.session_state["emergency_exit_requested"]=True; st.error("Emergency exit requested; execution is halted pending broker confirmation.")
+    if d.button("REFRESH MARKET DATA",use_container_width=True): refresh_terminal_quotes(True); st.rerun()
+    if run: st.session_state["alphaquant_run_pending"]=True
+    p1,p2=st.columns([1,2]);
+    with p1:
+        st.markdown('<div class="aq-panel-title">Market Overview</div>',unsafe_allow_html=True); st.metric("Market breadth",st.session_state.get("market_regime","NEUTRAL")); render_watchlist(False)
+    with p2:
+        st.markdown('<div class="aq-panel-title">Portfolio Summary</div>',unsafe_allow_html=True); paper_portfolio_summary(); render_opportunities()
+    q1,q2=st.columns(2)
+    with q1: st.markdown('<div class="aq-panel-title">Open Positions</div>',unsafe_allow_html=True); st.dataframe(position_frame(),use_container_width=True,hide_index=True)
+    with q2: st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True); st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
+    st.markdown('<div class="aq-panel-title">Alerts / Important Market Events</div>',unsafe_allow_html=True)
+    errors=CentralErrorManager().get_errors(); st.caption("No active market alerts." if not errors else f"{len(errors)} system alert(s); details available in Developer.")
+
 # =====================================================
 # WORKSPACE CONTENT ROUTER (final render area)
 # =====================================================
@@ -9922,74 +9933,32 @@ if _P("Developer Mode"):
 # filters + RUN button + pipeline) so the one-click behaviour is preserved.
 
 if _P("Dashboard"):
-    show_market_dashboard()
-    show_portfolio_summary()
-    show_ai_summary()
-
+    render_terminal_dashboard()
+elif _P("Watchlist"):
+    render_watchlist(True)
+elif _P("Positions"):
+    st.markdown('<div class="aq-panel-title">Open Positions</div>',unsafe_allow_html=True)
+    st.dataframe(position_frame(),use_container_width=True,hide_index=True)
+elif _P("Holdings"):
+    st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True)
+    st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
 elif _P("Profile"):
-    st.subheader("Profile & Trading Preferences")
-    preferences = st.session_state["workspace_preferences"]
-    p1, p2 = st.columns(2)
-    ai_profile = p1.selectbox(
-        "AI profile", ["Conservative", "Balanced", "Aggressive"],
-        index=["Conservative", "Balanced", "Aggressive"].index(preferences["ai_profile"]),
-    )
-    minimum_confidence = p2.slider(
-        "Minimum confidence", 0, 100, int(preferences["minimum_confidence"]),
-    )
-    density = p1.selectbox(
-        "Workspace density", ["Compact", "Comfortable"],
-        index=0 if preferences["dashboard_density"] == "Compact" else 1,
-    )
-    opportunity_limit = p2.number_input(
-        "Maximum opportunities", 1, 25, int(preferences["opportunity_limit"]),
-    )
-    developer_mode = st.toggle(
-        "Enable developer tools", value=bool(preferences["developer_mode"]),
-    )
-    if st.button("Save workspace", type="primary"):
-        WORKSPACE.save(
-            ai_profile=ai_profile,
-            minimum_confidence=minimum_confidence,
-            dashboard_density=density,
-            opportunity_limit=opportunity_limit,
-            developer_mode=developer_mode,
-        )
-        st.success("Workspace preferences saved.")
-
+    st.subheader("Profile / Trading Preferences"); preferences=WORKSPACE.preferences; p1,p2=st.columns(2)
+    history=p1.selectbox("History period",["6mo","1y","2y","5y"],index=["6mo","1y","2y","5y"].index(preferences["history_period"]))
+    interval=p2.selectbox("Default candle interval",["1m","5m","15m","30m","1h","1d","1wk"],index=["1m","5m","15m","30m","1h","1d","1wk"].index(preferences["candle_interval"]))
+    min_price=p1.number_input("Minimum stock price",1,value=int(preferences["minimum_price"])); min_volume=p2.number_input("Minimum average volume",1000,value=int(preferences["minimum_volume"]),step=1000)
+    max_positions=p1.slider("Maximum open positions",1,20,int(preferences["maximum_positions"])); developer=p2.toggle("Enable Developer mode",value=bool(preferences["developer_mode"]))
+    if st.button("Save Trading Preferences",type="primary"):
+        WORKSPACE.save(history_period=history,candle_interval=interval,minimum_price=min_price,minimum_volume=min_volume,maximum_positions=max_positions,developer_mode=developer); st.success("Preferences saved."); st.rerun()
 elif _P("Reports"):
-    st.subheader("Reports")
-    st.caption("Exports preserve the decision rationale captured by the strategy and AI engines.")
-    report = get_final_trade_dataframe()
-    if report.empty:
-        st.info("Run AlphaQuant to generate a decision audit report.")
-    else:
-        st.dataframe(report, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download Decision Audit CSV", report.to_csv(index=False).encode("utf-8"),
-            file_name=f"alphaquant_decision_audit_{datetime.now():%Y%m%d}.csv",
-            mime="text/csv",
-        )
-
+    st.subheader("Reports & Decision Audit"); trades=get_final_trade_dataframe(); positions=position_frame(); holdings=holdings_frame()
+    reports={"Trade Report":trades,"P&L Report":pd.DataFrame(st.session_state.get("paper_history",[])),"Position Report":positions,"Holdings Report":holdings,"Decision Audit Report":trades}
+    for name,df in reports.items():
+        if "Reason" not in df.columns and name in ("Trade Report","Decision Audit Report"): df=df.assign(Entry_Reason="Captured in decision rationale",Exit_Reason="Open / strategy exit")
+        st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode(),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv",disabled=df.empty)
+    st.caption("Excel/PDF exports are offered only when their optional writer dependencies are installed; CSV is always available.")
 elif _P("Developer Mode"):
-    if not st.session_state["workspace_preferences"].get("developer_mode"):
-        st.warning("Developer Mode is disabled. Enable it from Profile.")
-    st.subheader("Engineering Workspace")
-    with st.expander("Current Scan Universe", expanded=True):
-        _current = st.session_state.get("scan_universe", []) or []
-        if _current:
-            st.metric("Symbols in scan list", f"{len(_current):,}")
-            st.dataframe(
-                pd.DataFrame({"Symbol": _current[:500]}),
-                use_container_width=True,
-                hide_index=True,
-            )
-            if len(_current) > 500:
-                st.caption(f"Showing first 500 of {len(_current):,} symbols.")
-        else:
-            st.info("No scan list built yet. Click 🚀 RUN ALPHAQUANT on the Dashboard tab.")
-
-    show_alphaquant_os_panel()
+    st.subheader("Developer / Engineering Workspace"); st.caption("Pipeline diagnostics, universe health, engine status and logs are isolated here."); show_alphaquant_os_panel()
 
 if st.session_state.run_complete_scan_requested:
 
@@ -10215,7 +10184,8 @@ def autonomous_loop_fragment():
         st.caption("Waiting for the first autonomous cycle...")
 
 
-autonomous_loop_fragment()
+if _P("Developer Mode"):
+    autonomous_loop_fragment()
 
 # =====================================================
 # LIVE MARKET ENGINE
@@ -10331,14 +10301,20 @@ class MarketDataManager:
         df = pd.read_csv(path, index_col=0, parse_dates=True)
         return df.sort_index()
 
-    def _save(self, symbol: str, interval: str, df):
+    def _save(self, symbol: str, interval: str, df, source="historical provider"):
         if df is not None and not df.empty:
+            df = df.copy()
+            index = pd.to_datetime(df.index, utc=True, errors="coerce")
+            df = df.loc[~index.isna()]
+            df.index = index[~index.isna()]
+            df = df[~df.index.duplicated(keep="last")].sort_index()
             path = self._path(symbol, interval)
-            df.sort_index().to_csv(path)
+            df.to_csv(path)
             df.sort_index().to_pickle(str(path) + ".pkl.gz", compression="gzip")
             st.session_state[self.session_key]["last_persisted"] = datetime.now()
             st.session_state[self.session_key].setdefault("versions", {})[f"{symbol}:{interval}"] = {
-                "rows": int(len(df)), "updated_at": datetime.now().isoformat(), "path": str(path)
+                "rows": int(len(df)), "updated_at": datetime.now().isoformat(), "path": str(path),
+                "source": source, "completed_candles_only": True,
             }
 
     def backup_history(self, symbol: str, interval: str = "1d"):
@@ -10395,9 +10371,18 @@ class MarketDataManager:
             if incoming is None or incoming.empty:
                 updated[symbol] = cached
                 continue
-            merged = incoming if cached is None or cached.empty else pd.concat([cached, incoming])
+            incoming = incoming.copy()
+            incoming.index = pd.to_datetime(incoming.index, utc=True, errors="coerce")
+            incoming = incoming[~incoming.index.isna()]
+            # Providers commonly return the candle currently forming. It may be
+            # used in the live view, but is never persisted as completed history.
+            now_utc = pd.Timestamp.now(tz="UTC")
+            duration = {"1m":"1min","5m":"5min","15m":"15min","30m":"30min","1h":"1h","1d":"1D","1wk":"7D"}.get(interval,"1D")
+            completed = incoming.index + pd.to_timedelta(duration) <= now_utc
+            incoming_completed = incoming.loc[completed]
+            merged = incoming_completed if cached is None or cached.empty else pd.concat([cached, incoming_completed])
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-            self._save(symbol, interval, merged)
+            self._save(symbol, interval, merged, source="fallback provider incremental")
             updated[symbol] = merged
         st.session_state[self.session_key]["history"].update({k: v for k, v in updated.items() if v is not None})
         logging.info("MarketDataManager incremental update | symbols=%s | interval=%s", len(updated), interval)
@@ -10634,8 +10619,8 @@ if "live_enabled" not in st.session_state:
 if "live_interval" not in st.session_state:
     st.session_state.live_interval = "5m"
 
-# ------------------------ Live Market UI (rendered on Dashboard tab) ------
-if _P("Dashboard"):
+# ------------------------ Live Market UI (Developer only) -----------------
+if _P("Developer Mode"):
     st.divider()
     st.subheader("Live Market Engine")
 
