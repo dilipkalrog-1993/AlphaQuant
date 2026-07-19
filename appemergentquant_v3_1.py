@@ -31,9 +31,11 @@ import time
 import logging
 import traceback
 import warnings
+from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 # Make the `os_brains` package importable regardless of the process's
 # working directory. app.py uses absolute imports like
@@ -390,6 +392,56 @@ if "startup_health" not in st.session_state:
     st.session_state.startup_health = []
 
 
+@dataclass(slots=True)
+class PipelineDiagnostics:
+    """Exception-safe diagnostics recorder for non-trading pipeline stages."""
+
+    session_key: str = "pipeline_diagnostics"
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__))
+
+    def reset(self) -> None:
+        """Reset diagnostics for the current application run."""
+        st.session_state[self.session_key] = []
+
+    def record(
+        self,
+        stage: str,
+        status: str,
+        message: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a diagnostics event without interrupting pipeline execution."""
+        try:
+            events = st.session_state.setdefault(self.session_key, [])
+            events.append({
+                "Time": datetime.now().strftime("%H:%M:%S"),
+                "Stage": stage,
+                "Status": status,
+                "Message": message,
+                "Metadata": metadata or {},
+            })
+            self.logger.info(
+                "Pipeline diagnostics | stage=%s | status=%s | message=%s",
+                stage,
+                status,
+                message,
+            )
+        except Exception as exc:
+            self.logger.warning("Pipeline diagnostics recording failed: %s", exc)
+
+    def record_startup_health(self, checks: list[dict[str, Any]]) -> None:
+        """Capture startup health summary diagnostics only."""
+        total = len(checks)
+        unhealthy = sum(1 for check in checks if check.get("Status") != "OK")
+        status = "OK" if unhealthy == 0 else "DEGRADED"
+        self.record(
+            "Startup Health Check",
+            status,
+            f"{total - unhealthy}/{total} startup checks passed",
+            {"total": total, "unhealthy": unhealthy},
+        )
+
+
 # =====================================================
 # HEADER
 # =====================================================
@@ -471,6 +523,7 @@ def run_startup_health_check():
 
     add("Configuration", bool(CONFIG), f"{len(CONFIG)} settings loaded")
     st.session_state.startup_health = checks
+    PipelineDiagnostics().record_startup_health(checks)
     return checks
 
 
