@@ -67,6 +67,36 @@ from urllib3.util.retry import Retry
 
 warnings.filterwarnings("ignore")
 
+# NSE cash-session policy. Keep this as the single market-hours helper so a
+# holiday calendar can be injected later without changing UI or provider code.
+IST = ZoneInfo("Asia/Kolkata")
+NSE_MARKET_OPEN = (9, 15)
+NSE_MARKET_CLOSE = (15, 30)
+NSE_HOLIDAY_CALENDAR = None
+
+def is_market_open(now=None) -> bool:
+    """Return whether *now* falls in the regular NSE cash session (IST)."""
+    current = now or datetime.now(IST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=IST)
+    else:
+        current = current.astimezone(IST)
+    if current.weekday() >= 5:
+        return False
+    if NSE_HOLIDAY_CALENDAR is not None and NSE_HOLIDAY_CALENDAR(current.date()):
+        return False
+    opened = current.replace(hour=NSE_MARKET_OPEN[0], minute=NSE_MARKET_OPEN[1], second=0, microsecond=0)
+    closed = current.replace(hour=NSE_MARKET_CLOSE[0], minute=NSE_MARKET_CLOSE[1], second=0, microsecond=0)
+    return opened <= current <= closed
+
+def market_status(now=None) -> str:
+    """Fail-safe display wrapper; market-status failures never break a page."""
+    try:
+        return "OPEN" if is_market_open(now) else "CLOSED"
+    except Exception:
+        logging.exception("NSE market-status evaluation failed")
+        return "UNKNOWN"
+
 # =====================================================
 # PAGE CONFIG
 # =====================================================
@@ -121,7 +151,7 @@ hr{margin:.35rem 0!important;border-color:var(--aq-line)!important} #MainMenu,fo
 st.markdown('<div class="aq-brand"><b>ALPHAQUANT TERMINAL</b><span>MARKETS · RESEARCH · EXECUTION · RISK</span></div>', unsafe_allow_html=True)
 
 # Compact top navigation. Developer is absent until explicitly enabled in Profile.
-_BASE_PAGES = ["Dashboard", "Watchlist", "Positions", "Holdings", "Reports", "Profile", "Broker"]
+_BASE_PAGES = ["Dashboard", "Watchlist", "Positions", "Holdings", "Reports", "Profile", "Broker", "Symbol Details"]
 _developer_enabled = bool(st.session_state.get("workspace_preferences", {}).get("developer_mode", False))
 _PAGE_LIST = _BASE_PAGES + (["Developer"] if _developer_enabled else [])
 if st.session_state.get("_page") not in _PAGE_LIST:
@@ -202,6 +232,16 @@ class WorkspaceManager:
         "column_order": {},
         "filters": {},
         "panel_sizes": {},
+        "universe_source": "NIFTY 50",
+        "universe_filters": {},
+        "universe_presets": {},
+        "operating_mode": "Fast Scan",
+        "execution_mode": "PAPER",
+        "default_broker": "YFinance (default, no login)",
+        "selected_watchlist": "Default",
+        "chart_timeframe": "1d",
+        "risk_preferences": {},
+        "report_filters": {},
     }
 
     def __init__(self) -> None:
@@ -778,6 +818,10 @@ NSE_INDEX_SOURCES: dict[str, str] = {
     "NSE500":         "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
     "Midcap":         "https://nsearchives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
     "Smallcap":       "https://nsearchives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+    "Nifty100":       "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv",
+    "Nifty200":       "https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv",
+    "BankNifty":      "https://nsearchives.nseindia.com/content/indices/ind_niftybanklist.csv",
+    "FinNifty":       "https://nsearchives.nseindia.com/content/indices/ind_niftyfinancelist.csv",
 }
 
 # Alternative hosts tried in order after the primary fails. Only real,
@@ -4006,22 +4050,30 @@ def _pipeline_event(event):
 
 
 def build_default_scan_universe_for_pipeline():
-    # Reads filter values from persistent *_saved keys (see SCANNER FILTER
-    # PERSISTENCE at top of file). Works regardless of which tab is
-    # currently active, because those keys are initialised once at file
-    # load and updated on every Scanner widget render.
-    _ss = st.session_state
-    st.session_state.scan_universe = build_scan_universe(
-        _ss["scan_manager_universe_choice_saved"],
-        cap_filter=_ss["scan_manager_cap_filter_saved"],
-        price_range=_ss["scan_manager_price_range_saved"],
-        min_volume=_ss["scan_manager_min_volume_saved"],
-        min_turnover=_ss["scan_manager_min_turnover_saved"],
-        sectors=_ss["scan_manager_sector_filter_saved"],
-        styles=_ss["scan_manager_style_filter_saved"],
-    )
-    st.session_state.scan_manager_active_styles = _ss["scan_manager_style_filter_saved"]
-    return f"{len(st.session_state.scan_universe)} symbols"
+    """Resolve persisted pre-run choices before any historical download."""
+    prefs = WORKSPACE.preferences
+    filters = dict(st.session_state.get("active_prerun_filters") or prefs.get("universe_filters", {}))
+    source = st.session_state.get("active_universe_source", prefs.get("universe_source", "NIFTY 50"))
+    mode = st.session_state.get("active_operating_mode", prefs.get("operating_mode", "Fast Scan"))
+    if mode == "Custom Universe" or source == "Custom symbol list":
+        symbols = _normalise_custom_symbols(filters.get("custom_symbols", ""))
+    elif mode == "Watchlist Only" or source == "User watchlist" or filters.get("watchlist_only"):
+        symbols = _clean_and_suffix_symbols(st.session_state.get("watchlist", []))
+    else:
+        symbols = build_scan_universe(
+            _source_to_engine(source), cap_filter=filters.get("market_cap", "Any"),
+            price_range=(float(filters.get("minimum_price", 0)), float(filters.get("maximum_price", 100000))),
+            min_volume=int(filters.get("minimum_volume", 0)),
+            min_turnover=int(filters.get("minimum_turnover", 0)),
+            sectors=filters.get("sector", []), styles=filters.get("enabled_strategies", []),
+        )
+    if mode == "Fast Scan":
+        priority = _clean_and_suffix_symbols(st.session_state.get("watchlist", []))
+        symbols = list(dict.fromkeys(priority + symbols))[:200]
+    st.session_state.scan_universe = symbols
+    st.session_state.scan_manager_active_styles = filters.get("enabled_strategies", [])
+    st.session_state["pipeline_state"] = "PREPARING"
+    return f"{len(symbols)} symbols ({mode})"
 
 
 
@@ -4097,11 +4149,6 @@ def run_alphaquant(trigger="MANUAL"):
     health.mark("last_scan")
     PipelineMonitor().update()
     return True, f"RUN ALPHAQUANT queued: {len(st.session_state.market_data)} symbols."
-
-
-def run_automated_cycle(trigger="AUTONOMOUS"):
-    """Autonomous loop compatibility wrapper around the one-button workflow."""
-    return run_alphaquant(trigger=trigger)
 
 
 
@@ -9783,12 +9830,12 @@ def render_ticker_strip():
         cls="aq-up" if change>=0 else "aq-down"
         cells.append(f'<div class="aq-tick"><strong>{name}</strong>{value} <span class="{cls}">{change:+.2f} ({pct:+.2f}%)</span><br><small>{stamp}</small></div>')
     st.markdown('<div class="aq-ticker">'+''.join(cells)+'</div>',unsafe_allow_html=True)
-    now=datetime.now(ZoneInfo("Asia/Kolkata")); opened=is_market_open(now)
+    status=market_status(); opened=status=="OPEN"
     advances=sum(1 for q in quotes.values() if q["change"]>0); declines=sum(1 for q in quotes.values() if q["change"]<0)
     breadth="POSITIVE" if advances>declines else "NEGATIVE" if declines>advances else "NEUTRAL"
     regime=st.session_state.get("market_regime",breadth)
     live=st.session_state.get("active_broker_client") is not None
-    st.markdown(f'<div class="aq-status"><b class="{"aq-up" if opened else "aq-down"}">MARKET {"OPEN" if opened else "CLOSED"}</b><span>A/D {advances}/{declines}</span><span>BREADTH {breadth}</span><span>REGIME {regime}</span><span>BROKER {"CONNECTED" if live else "OFFLINE"}</span><span>SOURCE {st.session_state.get("terminal_quote_source","fallback provider")}</span></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="aq-status"><b class="{"aq-up" if opened else "aq-down"}">MARKET {status}</b><span>A/D {advances}/{declines}</span><span>BREADTH {breadth}</span><span>REGIME {regime}</span><span>BROKER {"CONNECTED" if live else "OFFLINE"}</span><span>SOURCE {st.session_state.get("terminal_quote_source","fallback provider")}</span></div>',unsafe_allow_html=True)
 
 def _trade_row(t):
     entry=float(getattr(t,"entry",0) or 0); target=float(getattr(t,"target1",0) or 0)
@@ -9900,8 +9947,136 @@ def holdings_frame():
         rows.append({"Symbol":get("symbol",""),"Quantity":qty,"Average Cost":avg,"CMP":cmp,"Invested Value":avg*qty,"Current Value":cmp*qty,"Unrealized P&L":(cmp-avg)*qty,"Allocation":get("allocation",0),"Confidence":get("confidence",0),"Why Still Holding":get("reason","Thesis intact"),"Exit Condition":get("exit_condition","Risk or target trigger")})
     return pd.DataFrame(rows)
 
+UNIVERSE_SOURCE_OPTIONS = [
+    "Entire NSE", "NIFTY 50", "NIFTY 100", "NIFTY 200", "NIFTY 500",
+    "BANK NIFTY constituents", "FINNIFTY constituents", "Sector index",
+    "User watchlist", "Custom symbol list", "Previously saved universe preset",
+]
+OPERATING_MODES = ["Full Universe", "Fast Scan", "Watchlist Only", "Custom Universe"]
+
+
+def _source_to_engine(source: str) -> str:
+    return {
+        "Entire NSE": "NSE All", "NIFTY 50": "Nifty50", "NIFTY 100": "Nifty100",
+        "NIFTY 200": "Nifty200", "NIFTY 500": "NSE500",
+        "BANK NIFTY constituents": "BankNifty", "FINNIFTY constituents": "FinNifty",
+        "User watchlist": "Watchlist",
+    }.get(source, "NSE All")
+
+
+def _normalise_custom_symbols(raw: str) -> list[str]:
+    values = raw.replace("\n", ",").replace(";", ",").split(",")
+    return sorted(set(_clean_and_suffix_symbols(v.strip().upper().replace(".NS", "") for v in values if v.strip())))
+
+
+def render_pre_run_universe_filters():
+    """Persist and present filters that are resolved before history download."""
+    prefs = WORKSPACE.preferences
+    saved = dict(prefs.get("universe_filters", {}))
+    source_default = prefs.get("universe_source", "NIFTY 50")
+    mode_default = prefs.get("operating_mode", "Fast Scan")
+    with st.expander("PRE-RUN UNIVERSE FILTER", expanded=True):
+        a, b, c = st.columns(3)
+        source = a.selectbox("Universe source", UNIVERSE_SOURCE_OPTIONS,
+            index=UNIVERSE_SOURCE_OPTIONS.index(source_default) if source_default in UNIVERSE_SOURCE_OPTIONS else 1,
+            key="prerun_universe_source")
+        mode = b.selectbox("Operating mode", OPERATING_MODES,
+            index=OPERATING_MODES.index(mode_default) if mode_default in OPERATING_MODES else 1,
+            key="prerun_operating_mode")
+        period = c.selectbox("History period", ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+            index=["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"].index(prefs.get("history_period", "1y")), key="prerun_period")
+        interval = c.selectbox("Candle interval", ["1m", "5m", "15m", "30m", "1h", "1d", "1wk"],
+            index=["1m", "5m", "15m", "30m", "1h", "1d", "1wk"].index(prefs.get("candle_interval", "1d")), key="prerun_interval")
+        custom = st.text_area("Custom symbol list", saved.get("custom_symbols", ""), height=68,
+            placeholder="RELIANCE, TCS, INFY", key="prerun_custom_symbols",
+            disabled=source != "Custom symbol list" and mode != "Custom Universe")
+        s1, s2, s3, s4 = st.columns(4)
+        minimum_price = s1.number_input("Minimum stock price", 0.0, value=float(saved.get("minimum_price", prefs.get("minimum_price", 20))))
+        maximum_price = s2.number_input("Maximum stock price", 0.0, value=float(saved.get("maximum_price", 20000)))
+        minimum_volume = s3.number_input("Minimum average daily volume", 0, value=int(saved.get("minimum_volume", prefs.get("minimum_volume", 100000))), step=1000)
+        minimum_turnover = s4.number_input("Minimum traded value", 0, value=int(saved.get("minimum_turnover", CONFIG["MIN_AVG_TURNOVER"])), step=100000)
+        t1, t2, t3, t4 = st.columns(4)
+        sector = t1.multiselect("Sector", sorted(set(STOCK_SECTOR_MAP.values())), default=saved.get("sector", []))
+        market_cap = t2.selectbox("Market-cap band", ["Any", "Large Cap", "Mid Cap", "Small Cap"], index=["Any", "Large Cap", "Mid Cap", "Small Cap"].index(saved.get("market_cap", "Any")))
+        exchange = t3.selectbox("Exchange", ["NSE"], help="The current universe engine is NSE-only.")
+        industry = t4.text_input("Industry", saved.get("industry", ""), help="Applied when instrument metadata is available.")
+        u1, u2, u3, u4 = st.columns(4)
+        fno_only = u1.toggle("F&O only", saved.get("fno_only", False))
+        exclude_etfs = u2.toggle("Exclude ETFs", saved.get("exclude_etfs", True))
+        exclude_sme = u3.toggle("Exclude SME", saved.get("exclude_sme", True))
+        exclude_illiquid = u4.toggle("Exclude illiquid/unavailable", saved.get("exclude_illiquid", True))
+        v1, v2, v3, v4 = st.columns(4)
+        styles = v1.multiselect("Strategy horizon", ["Intraday", "Swing", "Positional"], default=saved.get("styles", ["Swing"]))
+        direction = v2.selectbox("Direction", ["Long only", "Short enabled"], index=1 if saved.get("short_enabled") else 0)
+        confidence = v3.slider("Minimum confidence", 0, 100, int(saved.get("minimum_confidence", prefs.get("minimum_confidence", 70))))
+        risk = v4.selectbox("Maximum risk rating", ["LOW", "MEDIUM", "HIGH"], index=["LOW", "MEDIUM", "HIGH"].index(saved.get("maximum_risk", "HIGH")))
+        expected = v1.number_input("Minimum expected return %", 0.0, 100.0, float(saved.get("minimum_return", 0.0)))
+        enabled = v2.multiselect("Enabled strategies", sorted(SCAN_STYLE_STRATEGY_MAP), default=saved.get("enabled_strategies", []))
+        watch_only = v3.toggle("Watchlist only", saved.get("watchlist_only", False))
+        filters = {"custom_symbols": custom, "minimum_price": minimum_price, "maximum_price": maximum_price,
+            "minimum_volume": minimum_volume, "minimum_turnover": minimum_turnover, "sector": sector,
+            "market_cap": market_cap, "industry": industry, "exchange": exchange, "fno_only": fno_only,
+            "exclude_etfs": exclude_etfs, "exclude_sme": exclude_sme, "exclude_illiquid": exclude_illiquid,
+            "styles": styles, "short_enabled": direction == "Short enabled", "minimum_confidence": confidence,
+            "maximum_risk": risk, "minimum_return": expected, "enabled_strategies": enabled, "watchlist_only": watch_only}
+        if st.button("Save pre-run filters", key="save_prerun_filters"):
+            WORKSPACE.save(universe_source=source, operating_mode=mode, universe_filters=filters,
+                history_period=period, candle_interval=interval, execution_mode=st.session_state.get("execution_mode", "PAPER"))
+            st.success("Workspace settings saved.")
+        source_estimates = {"Entire NSE": 2200, "NIFTY 50": 50, "NIFTY 100": 100, "NIFTY 200": 200,
+            "NIFTY 500": 500, "BANK NIFTY constituents": 12, "FINNIFTY constituents": 20}
+        estimated = len(st.session_state.get("scan_universe", [])) or source_estimates.get(source, len(st.session_state.get("watchlist", [])))
+        if mode == "Fast Scan": estimated = min(estimated, 200)
+        if mode in ("Watchlist Only", "Custom Universe"): estimated = len(st.session_state.get("watchlist", [])) if mode == "Watchlist Only" else len(_normalise_custom_symbols(custom))
+        last_update = st.session_state.get(MarketDataManager.session_key, {}).get("last_persisted") if "MarketDataManager" in globals() else None
+        m1,m2,m3,m4,m5,m6=st.columns(6)
+        m1.metric("Selected Universe", source); m2.metric("Estimated Symbols", estimated)
+        m3.metric("Download Workload", f"Up to {estimated} incremental")
+        m4.metric("Last Data Update", str(last_update or "Not yet synced")); m5.metric("History", period); m6.metric("Interval", interval)
+        now = datetime.now(IST); open_at = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        if mode == "Full Universe" and (now >= open_at - timedelta(minutes=45)):
+            st.info("Market opens soon or is in session. Fast Scan is recommended for quicker readiness; your selected mode was not changed.")
+    st.session_state["active_prerun_filters"] = filters
+    st.session_state["active_universe_source"] = source
+    st.session_state["active_operating_mode"] = mode
+    CONFIG["DOWNLOAD_PERIOD"], CONFIG["DOWNLOAD_INTERVAL"] = period, interval
+
+
+def render_symbol_details(symbol: str | None = None):
+    """Render a non-blocking symbol detail view from persistent or fallback data."""
+    candidates = sorted(set(st.session_state.get("watchlist", [])) | {str(x).replace(".NS", "") for x in st.session_state.get("market_data", {})})
+    if not candidates:
+        st.info("Add a symbol to a watchlist or run AlphaQuant to open Symbol Details.")
+        return
+    selected = symbol or st.selectbox("Symbol", candidates, key="details_symbol")
+    timeframe = st.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "1h", "1d", "1wk"],
+        index=["1m", "5m", "15m", "30m", "1h", "1d", "1wk"].index(WORKSPACE.preferences.get("chart_timeframe", "1d")), key="details_timeframe")
+    if timeframe != WORKSPACE.preferences.get("chart_timeframe"):
+        WORKSPACE.save(chart_timeframe=timeframe)
+    manager = MarketDataManager()
+    data = manager._load(selected + ".NS", timeframe)
+    if data is None or data.empty:
+        data = manager._load(selected, timeframe)
+    source = "persistent historical store"
+    if data is None or data.empty:
+        data = st.session_state.get("market_data", {}).get(selected + ".NS")
+        source = "provider fallback (delayed)"
+    if data is None or not isinstance(data, pd.DataFrame) or data.empty:
+        st.warning("No chart history is available for this symbol and timeframe. Run AlphaQuant to download it.")
+        return
+    data = data.tail(500).copy(); last=data.iloc[-1]; previous=float(data["Close"].iloc[-2]) if len(data)>1 else float(last["Close"])
+    change=float(last["Close"])-previous
+    cols=st.columns(7)
+    for col,(label,value) in zip(cols,[("Symbol",selected),("Price",f"₹{float(last['Close']):,.2f}"),("Change",f"{change:+.2f}"),("Change %",f"{change/previous*100:+.2f}%" if previous else "—"),("Open",f"{float(last['Open']):,.2f}"),("High / Low",f"{float(last['High']):,.2f} / {float(last['Low']):,.2f}"),("Volume",f"{float(last.get('Volume',0)):,.0f}")]): col.metric(label,value)
+    chart = data.reset_index().rename(columns={data.reset_index().columns[0]: "Timestamp"})
+    candle_spec={"vconcat":[{"height":340,"mark":{"type":"rule","tooltip":True},"encoding":{"x":{"field":"Timestamp","type":"temporal","scale":{"domain":"unaggregated"}},"y":{"field":"Low","type":"quantitative","scale":{"zero":False}},"y2":{"field":"High"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}},{"height":100,"mark":"bar","encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Volume","type":"quantitative"},"color":{"value":"#52657d"}}}],"resolve":{"scale":{"x":"shared"}}}
+    st.vega_lite_chart(chart, candle_spec, use_container_width=True)
+    st.caption(f"Source: {source} · Last update: {data.index[-1]} · Bid/ask and company metadata appear when supplied by the active broker. Chart supports browser zoom/pan through Vega interaction.")
+
+
 def render_terminal_dashboard():
     render_ticker_strip()
+    render_pre_run_universe_filters()
     mode=st.radio("Execution mode",["PAPER","LIVE"],horizontal=True,key="execution_mode",help="Paper uses the built-in simulation broker; Live requires an authenticated broker.")
     live_connected=st.session_state.get("active_broker_client") is not None
     if mode=="LIVE" and not live_connected:
@@ -9912,7 +10087,17 @@ def render_terminal_dashboard():
     if b.button("STOP",use_container_width=True): st.session_state["autonomous_enabled"]=False; st.session_state["stop_requested"]=True
     if c.button("EMERGENCY EXIT",use_container_width=True): st.session_state["emergency_exit_requested"]=True; st.error("Emergency exit requested; execution is halted pending broker confirmation.")
     if d.button("REFRESH MARKET DATA",use_container_width=True): refresh_terminal_quotes(True); st.rerun()
-    if run: st.session_state["alphaquant_run_pending"]=True
+    if run:
+        WORKSPACE.save(execution_mode=mode)
+        st.session_state["alphaquant_run_pending"]=True
+    pipeline_state = "RUNNING" if st.session_state.get("autonomous_active") else "STOPPED" if st.session_state.get("stop_requested") else "READY"
+    readiness = {"Profile":"READY", "Historical Database":"READY" if MarketDataManager.storage_dir.exists() else "EMPTY",
+        "Selected Universe":st.session_state.get("active_universe_source", "Not selected"), "Broker":"CONNECTED" if live_connected else "OFFLINE",
+        "Live Feed":"LIVE" if live_connected else "PROVIDER / DELAYED", "Market Status":market_status(), "Trading Mode":mode,
+        "Pipeline State":pipeline_state, "Last Sync":str(st.session_state.get("terminal_quote_time", "Never")),
+        "Data Source":st.session_state.get("terminal_quote_source", "fallback provider")}
+    st.markdown('<div class="aq-panel-title">System Readiness</div>', unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame([readiness]), use_container_width=True, hide_index=True)
     p1,p2=st.columns([1,2]);
     with p1:
         st.markdown('<div class="aq-panel-title">Market Overview</div>',unsafe_allow_html=True); st.metric("Market breadth",st.session_state.get("market_regime","NEUTRAL")); render_watchlist(False)
@@ -9942,6 +10127,9 @@ elif _P("Positions"):
 elif _P("Holdings"):
     st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True)
     st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
+elif _P("Symbol Details"):
+    st.markdown('<div class="aq-panel-title">Symbol Details & Price Chart</div>', unsafe_allow_html=True)
+    render_symbol_details()
 elif _P("Profile"):
     st.subheader("Profile / Trading Preferences"); preferences=WORKSPACE.preferences; p1,p2=st.columns(2)
     history=p1.selectbox("History period",["6mo","1y","2y","5y"],index=["6mo","1y","2y","5y"].index(preferences["history_period"]))
@@ -9999,38 +10187,8 @@ if st.session_state.run_complete_scan_requested:
 # constraint of Streamlit's request/response execution model, not a bug
 # in this feature.
 
-MARKET_OPEN = (9, 15)
-MARKET_CLOSE = (15, 30)
-
 MONITOR_INTERVAL_SECONDS = 20
 SCAN_INTERVAL_SECONDS = 300
-
-IST = ZoneInfo("Asia/Kolkata")
-
-
-def is_market_open(now=None):
-    """
-    NSE cash market hours: 09:15-15:30 IST, Monday-Friday. No holiday
-    calendar is consulted (out of scope) - a market holiday will still
-    read as "open" here, same limitation the rest of the app already has
-    since nothing else checks holidays either.
-    """
-
-    now = now or datetime.now(IST)
-
-    if now.weekday() >= 5:
-        return False
-
-    open_time = now.replace(
-        hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0
-    )
-
-    close_time = now.replace(
-        hour=MARKET_CLOSE[0], minute=MARKET_CLOSE[1], second=0, microsecond=0
-    )
-
-    return open_time <= now <= close_time
-
 
 def quick_refresh_open_positions():
     """
@@ -10076,50 +10234,6 @@ def quick_refresh_open_positions():
             remove_open_position(symbol)
 
 
-st.divider()
-
-st.subheader("Autonomous Trading Loop")
-
-st.caption(
-    "Runs the Scan Manager's chosen universe through the full pipeline "
-    "and monitors open positions on its own while the market is open and "
-    "this tab stays connected. It reuses run_automated_cycle() - the same "
-    "code path 'RUN ALPHAQUANT' uses - so there is one pipeline, "
-    "triggered manually or automatically."
-)
-
-col_auto_a, col_auto_b = st.columns(2)
-
-with col_auto_a:
-
-    if not st.session_state.autonomous_active:
-
-        if st.button("Start Autonomous Mode"):
-
-            if not st.session_state.scan_universe:
-                st.warning(
-                    "Build a scan list in Scan Manager above before "
-                    "starting autonomous mode."
-                )
-            else:
-                st.session_state.autonomous_active = True
-                st.rerun()
-
-    else:
-
-        if st.button("Stop Autonomous Mode"):
-
-            st.session_state.autonomous_active = False
-            st.rerun()
-
-with col_auto_b:
-
-    st.metric(
-        "Autonomous Mode",
-        "RUNNING" if st.session_state.autonomous_active else "STOPPED",
-    )
-
-
 @st.fragment(run_every=MONITOR_INTERVAL_SECONDS)
 def autonomous_loop_fragment():
 
@@ -10146,9 +10260,9 @@ def autonomous_loop_fragment():
 
     if due_for_full_cycle:
 
-        ok, msg = run_automated_cycle(trigger="AUTONOMOUS")
+        ok, msg = run_alphaquant(trigger="SCHEDULED")
 
-        # run_automated_cycle() only sets run_complete_scan_requested so the
+        # The shared run_alphaquant() path sets run_complete_scan_requested so the
         # manual button (defined earlier in the script, before
         # execute_scan_pipeline itself exists yet) can defer to the bottom
         # of the file. A fragment rerun only re-executes this function's own
@@ -10184,7 +10298,7 @@ def autonomous_loop_fragment():
         st.caption("Waiting for the first autonomous cycle...")
 
 
-if _P("Developer Mode"):
+if st.session_state.get("autonomous_active"):
     autonomous_loop_fragment()
 
 # =====================================================
@@ -11320,8 +11434,11 @@ class AlphaQuantOrchestrator:
                 f"{len(st.session_state.final_trade_list)} trade candidate(s), "
                 f"{len(st.session_state.paper_positions)} open position(s)."
             )
+            st.session_state["autonomous_active"] = True
+            st.session_state["stop_requested"] = False
+            st.session_state["pipeline_state"] = "MONITORING"
             WORKSPACE.save()
-            return True, "AlphaQuant workflow completed. " + st.session_state.last_cycle_message
+            return True, "AlphaQuant workflow completed; recurring monitoring is active. " + st.session_state.last_cycle_message
         except Exception as exc:
             CentralErrorManager().record_error("Run AlphaQuant", "orchestrator", exc)
             PipelineDiagnostics().fail_phase("Run AlphaQuant", str(exc))
