@@ -35,7 +35,7 @@ import uuid
 import hashlib
 import json
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -66,6 +66,96 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 warnings.filterwarnings("ignore")
+
+
+class AlphaQuantCoreRuntime:
+    """Process-wide control plane that is deliberately independent of a UI run.
+
+    Streamlit sessions are short-lived script executions.  This object is cached
+    as a process resource and owns the long-lived heartbeat, run identity and an
+    atomic recovery snapshot.  Trading objects remain in the existing engines;
+    the core receives portable snapshots so it never calls Streamlit from its
+    worker thread (which would bind it to a stale ScriptRunContext).
+    """
+
+    VERSION = 1
+
+    def __init__(self, storage_path: str):
+        self.storage_path = Path(storage_path)
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.RLock()
+        self.wake = threading.Event()
+        self.stop_event = threading.Event()
+        self.state = self._load()
+        self.thread = threading.Thread(target=self._worker, name="alphaquant-core", daemon=True)
+        self.thread.start()
+
+    def _load(self):
+        default = {"version": self.VERSION, "status": "STOPPED", "run_id": None,
+                   "heartbeat": None, "started_at": None, "pipeline": {},
+                   "positions": {}, "orders": {}, "candidates": []}
+        try:
+            saved = json.loads(self.storage_path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                default.update(saved)
+        except (OSError, ValueError, TypeError):
+            pass
+        # A process restart restores an armed engine without pretending an old
+        # worker is still alive.
+        if default["status"] in {"STARTING", "RUNNING", "MONITORING"}:
+            default["status"] = "RESTORED"
+        return default
+
+    def _persist(self):
+        temp = self.storage_path.with_suffix(".tmp")
+        temp.write_text(json.dumps(self.state, default=str, indent=2), encoding="utf-8")
+        temp.replace(self.storage_path)
+
+    def start(self, configuration: dict[str, Any]):
+        with self.lock:
+            if self.state.get("status") in {"STARTING", "RUNNING", "MONITORING"}:
+                return self.state["run_id"], False
+            now = datetime.now(timezone.utc).isoformat()
+            self.state.update(status="STARTING", run_id=uuid.uuid4().hex,
+                              started_at=now, heartbeat=now, configuration=configuration)
+            self._persist()
+        self.wake.set()
+        return self.state["run_id"], True
+
+    def stop(self):
+        with self.lock:
+            self.state.update(status="STOPPED", stopped_at=datetime.now(timezone.utc).isoformat())
+            self._persist()
+        self.wake.set()
+
+    def publish(self, **snapshot):
+        with self.lock:
+            self.state.update(snapshot)
+            if self.state.get("status") in {"STARTING", "RUNNING", "RESTORED"}:
+                self.state["status"] = "MONITORING"
+            self._persist()
+        self.wake.set()
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.state)
+
+    def _worker(self):
+        while not self.stop_event.is_set():
+            self.wake.wait(timeout=2.0)
+            self.wake.clear()
+            with self.lock:
+                if self.state.get("status") in {"STARTING", "RUNNING", "MONITORING", "RESTORED"}:
+                    self.state["heartbeat"] = datetime.now(timezone.utc).isoformat()
+                    if self.state["status"] == "STARTING":
+                        self.state["status"] = "RUNNING"
+                    self._persist()
+
+
+@st.cache_resource(show_spinner=False)
+def get_core_runtime():
+    """Return the sole daemon control plane for this Python process."""
+    return AlphaQuantCoreRuntime(str(Path(_APP_DIR) / "data" / "runtime_state.json"))
 
 # NSE cash-session policy. Keep this as the single market-hours helper so a
 # holiday calendar can be injected later without changing UI or provider code.
@@ -5645,6 +5735,29 @@ def _collect_no_trade_explanation():
     return reasons
 
 
+def entry_trigger_status(trade):
+    """Return a transparent READY-FOR-ENTRY gate using only cached market data."""
+    symbol = getattr(trade, "symbol", "")
+    frame = st.session_state.get("market_data", {}).get(symbol)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return False, "Waiting for a cached completed candle"
+    last = frame.iloc[-1]
+    price = float(last.get("Close", 0) or 0)
+    entry = float(getattr(trade, "entry", 0) or 0)
+    volume = float(last.get("Volume", 0) or 0)
+    average_volume = float(pd.to_numeric(frame.get("Volume"), errors="coerce").tail(20).mean() or 0)
+    vwap = float(last.get("VWAP", price) or price)
+    confidence = float(getattr(trade, "ai_score", getattr(trade, "confidence", 0)) or 0)
+    requirements = {
+        "entry price not reached": price >= entry if entry else False,
+        "price below VWAP": price >= vwap,
+        "volume confirmation missing": volume >= average_volume if average_volume else True,
+        "AI score below configured threshold": confidence >= float(WORKSPACE.preferences.get("minimum_confidence", 70)),
+    }
+    failed = [reason for reason, passed in requirements.items() if not passed]
+    return not failed, "Entry trigger confirmed" if not failed else "; ".join(failed)
+
+
 def execute_scan_pipeline():
     PipelineManager, PipelineStep = (lambda m: (m.PipelineManager, m.PipelineStep))(__import__("os_brains.pipeline_manager", fromlist=["PipelineManager", "PipelineStep"]))
 
@@ -5655,6 +5768,20 @@ def execute_scan_pipeline():
     manager = PipelineManager(on_event=_pipeline_event)
 
     def initialize_stage():
+        # Preserve the complete decision trail before beginning a new cycle.
+        # Rejected ideas are evidence, not disposable UI rows.
+        archive = st.session_state.setdefault("candidate_archive", [])
+        for trade in st.session_state.get("final_trade_list", []):
+            row = _trade_row(trade) if "_trade_row" in globals() else _portable_value(trade)
+            if isinstance(row, dict):
+                verdict = getattr(trade, "risk_verdict", {}) or {}
+                row.update({"Observed At": datetime.now(timezone.utc).isoformat(),
+                            "Stage": getattr(trade, "state", "CANDIDATE"),
+                            "Status": verdict.get("verdict", getattr(trade, "state", "PENDING")),
+                            "Reason": verdict.get("reason", "; ".join(getattr(trade, "reasons", []) or []))})
+                archive.append(row)
+        if len(archive) > 10000:
+            del archive[:-10000]
         st.session_state.trade_candidates = {}
         st.session_state.final_trade_list = []
         st.session_state.selected_portfolio = []
@@ -5676,7 +5803,18 @@ def execute_scan_pipeline():
             if progress:
                 progress.progress(index / total)
             status.write(f"Scanning : {symbol}")
-            df = calculate_indicators(df)
+            # Indicator computation is incremental at cycle granularity: an
+            # unchanged completed candle reuses the prepared frame instead of
+            # recomputing every EMA/ATR/ADX across the full history.
+            cache = st.session_state.setdefault("indicator_frame_cache", {})
+            signature = (len(df), str(df.index[-1]) if len(df) else "", float(pd.to_numeric(df.get("Close"), errors="coerce").iloc[-1]) if len(df) and "Close" in df else 0.0)
+            cached = cache.get(symbol)
+            if cached and cached[0] == signature:
+                df = cached[1].copy()
+            else:
+                df = calculate_indicators(df)
+                if df is not None:
+                    cache[symbol] = (signature, df.copy())
             if df is None:
                 candidate_reasons.append(f"{symbol}: indicator calculation failed")
                 continue
@@ -5736,9 +5874,18 @@ def execute_scan_pipeline():
         return f"{len(selected)} allocated trades"
 
     def paper_stage():
-        execute_selected_portfolio()
+        waiting = st.session_state.setdefault("waiting_entry", {})
+        triggered = 0
+        for trade in st.session_state.get("selected_portfolio", []):
+            valid, reason = entry_trigger_status(trade)
+            waiting[trade.symbol] = {"trade": trade, "reason": reason, "updated_at": datetime.now()}
+            trade.state = "READY_FOR_ENTRY" if not valid else "ENTRY_TRIGGERED"
+            if valid and trade.symbol not in st.session_state.paper_positions:
+                get_execution_engine().open_trade(trade)
+                waiting.pop(trade.symbol, None)
+                triggered += 1
         monitor_open_positions()
-        return f"{len(st.session_state.paper_positions)} open paper positions"
+        return f"{len(waiting)} waiting for entry; {triggered} triggered; {len(st.session_state.paper_positions)} open"
 
     def reviewer_memory_stage():
         reviewed = len(st.session_state.get("closed_positions", []))
@@ -5770,6 +5917,7 @@ def execute_scan_pipeline():
     execute_arbitrage_pipeline()
     PipelineMonitor().update()
     if ok:
+        persist_trading_state()
         st.success("Pipeline Completed Successfully")
     else:
         st.error("Pipeline stopped. See Mission Control logs.")
@@ -6794,6 +6942,80 @@ class PaperPosition:
             / 60
 
         )
+
+
+PAPER_STATE_PATH = Path(_APP_DIR) / "data" / "paper_state.json"
+
+
+def _portable_value(value):
+    """Convert trading state to deterministic JSON without losing timestamps."""
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _portable_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_portable_value(v) for v in value]
+    if hasattr(value, "__dict__"):
+        return _portable_value(vars(value))
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    return value
+
+
+def persist_trading_state():
+    """Atomically checkpoint paper ledger, positions and opportunity history."""
+    PAPER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "paper_broker": _portable_value(st.session_state.get("paper_broker", {})),
+        "paper_positions": _portable_value(st.session_state.get("paper_positions", {})),
+        "paper_history": _portable_value(st.session_state.get("paper_history", [])),
+        "candidate_archive": _portable_value(st.session_state.get("candidate_archive", [])),
+        "decision_funnel": _portable_value(st.session_state.get("decision_funnel", [])),
+    }
+    temp = PAPER_STATE_PATH.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(PAPER_STATE_PATH)
+    return payload
+
+
+def restore_trading_state_once():
+    """Restore open paper positions before rendering any trading workspace."""
+    if st.session_state.get("_paper_state_restored"):
+        return
+    st.session_state["_paper_state_restored"] = True
+    if not PAPER_STATE_PATH.exists():
+        return
+    try:
+        payload = json.loads(PAPER_STATE_PATH.read_text(encoding="utf-8"))
+        allowed = {f.name for f in fields(PaperPosition)}
+        positions = {}
+        for symbol, raw in (payload.get("paper_positions") or {}).items():
+            values = {k: v for k, v in raw.items() if k in allowed}
+            for key in ("entry_time", "exit_time"):
+                if values.get(key):
+                    values[key] = datetime.fromisoformat(values[key])
+            positions[symbol] = PaperPosition(**values)
+        history = []
+        for raw in payload.get("paper_history") or []:
+            if not isinstance(raw, dict):
+                continue
+            values = {k: v for k, v in raw.items() if k in allowed}
+            for key in ("entry_time", "exit_time"):
+                if values.get(key):
+                    values[key] = datetime.fromisoformat(values[key])
+            history.append(PaperPosition(**values))
+        st.session_state.paper_positions = positions
+        st.session_state.paper_history = history
+        if isinstance(payload.get("paper_broker"), dict):
+            st.session_state.paper_broker = payload["paper_broker"]
+            st.session_state.paper_broker["connected"] = False
+        st.session_state.candidate_archive = payload.get("candidate_archive", [])
+        st.session_state.decision_funnel = payload.get("decision_funnel", [])
+        st.session_state["restored_position_count"] = len(positions)
+    except (OSError, ValueError, TypeError) as exc:
+        logging.warning("Paper-state restore failed: %s", exc)
 # ==========================================================
 # MODULE A - PART 2
 # POSITION MANAGER
@@ -9905,6 +10127,19 @@ def filtered_opportunities(filters):
 
 def render_opportunities():
     st.markdown('<div class="aq-panel-title">Trade Opportunities</div>',unsafe_allow_html=True)
+    final = st.session_state.get("final_trade_list", [])
+    archive = st.session_state.get("candidate_archive", [])
+    potential = len(st.session_state.get("trade_candidates", {}))
+    approved = sum(1 for t in final if (getattr(t,"risk_verdict",{}) or {}).get("verdict") == "APPROVED")
+    rejected = sum(1 for t in final if (getattr(t,"risk_verdict",{}) or {}).get("verdict") in {"VETOED","REJECTED"})
+    executed = len(st.session_state.get("paper_history", [])) + len(st.session_state.get("paper_positions", {}))
+    for col, (label, value) in zip(st.columns(4), [("Potential Trades", potential),("Approved Trades",approved),("Rejected Trades",rejected),("Executed Trades",executed)]):
+        col.metric(label, value)
+    waiting = len(st.session_state.get("waiting_entry", {}))
+    funnel_counts = [("Universe",len(st.session_state.get("scan_universe",[]))),("Downloaded",len(st.session_state.get("market_data",{}))),
+        ("Strategy Signals",potential),("AI Approved",approved),("Risk Approved",approved),("Waiting Entry",waiting),
+        ("Executed",executed),("Open",len(st.session_state.get("paper_positions",{}))),("Closed",len(st.session_state.get("paper_history",[])))]
+    st.caption("  →  ".join(f"{name} **{count}**" for name,count in funnel_counts))
     filters=opportunity_filters(); df=filtered_opportunities(filters)
     if df.empty: st.caption("No opportunities match the active filters.")
     else: st.dataframe(df,use_container_width=True,hide_index=True,height=min(300,38+35*len(df)))
@@ -9915,6 +10150,9 @@ def render_opportunities():
         with st.expander(f"Decision rationale · {selected}"):
             labels=["Technical reason","Volume reason","Trend reason","Momentum reason","Sector reason","Market-regime reason","AI reason","Risk result","Portfolio-allocation result","News / sentiment factor","Final decision rationale"]
             for i,label in enumerate(labels): st.write(f"**{label}:** {reasons[i] if i<len(reasons) else verdict.get('reason','No adverse factor recorded by the active engines.')}")
+    if archive:
+        with st.expander(f"Decision archive · {len(archive)} retained candidates"):
+            st.dataframe(pd.DataFrame(archive).tail(500), use_container_width=True, hide_index=True)
 
 def _watchlist_quotes(symbols):
     rows=[]
@@ -10101,12 +10339,44 @@ def render_symbol_details(symbol: str | None = None):
     if data is None or not isinstance(data, pd.DataFrame) or data.empty:
         st.warning("No chart history is available for this symbol and timeframe. Run AlphaQuant to download it.")
         return
-    data = data.tail(500).copy(); last=data.iloc[-1]; previous=float(data["Close"].iloc[-2]) if len(data)>1 else float(last["Close"])
+    data = data.tail(500).copy()
+    overlays = st.multiselect("Overlays", ["EMA 20", "EMA 50", "VWAP", "Bollinger Bands", "Support / Resistance", "Trade Markers"],
+        default=["EMA 20", "VWAP", "Trade Markers"], key="details_chart_overlays")
+    close = pd.to_numeric(data["Close"], errors="coerce")
+    data["EMA 20"] = close.ewm(span=20, adjust=False).mean()
+    data["EMA 50"] = close.ewm(span=50, adjust=False).mean()
+    typical = (pd.to_numeric(data["High"], errors="coerce") + pd.to_numeric(data["Low"], errors="coerce") + close) / 3
+    volume = pd.to_numeric(data.get("Volume", 0), errors="coerce").fillna(0)
+    data["VWAP"] = (typical * volume).cumsum() / volume.cumsum().replace(0, np.nan)
+    middle = close.rolling(20).mean(); deviation = close.rolling(20).std()
+    data["BB Upper"], data["BB Lower"] = middle + 2 * deviation, middle - 2 * deviation
+    data["Support"], data["Resistance"] = pd.to_numeric(data["Low"], errors="coerce").rolling(20).min(), pd.to_numeric(data["High"], errors="coerce").rolling(20).max()
+    last=data.iloc[-1]; previous=float(data["Close"].iloc[-2]) if len(data)>1 else float(last["Close"])
     change=float(last["Close"])-previous
     cols=st.columns(7)
     for col,(label,value) in zip(cols,[("Symbol",selected),("Price",f"₹{float(last['Close']):,.2f}"),("Change",f"{change:+.2f}"),("Change %",f"{change/previous*100:+.2f}%" if previous else "—"),("Open",f"{float(last['Open']):,.2f}"),("High / Low",f"{float(last['High']):,.2f} / {float(last['Low']):,.2f}"),("Volume",f"{float(last.get('Volume',0)):,.0f}")]): col.metric(label,value)
     chart = data.reset_index().rename(columns={data.reset_index().columns[0]: "Timestamp"})
-    candle_spec={"vconcat":[{"height":340,"mark":{"type":"rule","tooltip":True},"encoding":{"x":{"field":"Timestamp","type":"temporal","scale":{"domain":"unaggregated"}},"y":{"field":"Low","type":"quantitative","scale":{"zero":False}},"y2":{"field":"High"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}},{"height":100,"mark":"bar","encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Volume","type":"quantitative"},"color":{"value":"#52657d"}}}],"resolve":{"scale":{"x":"shared"}}}
+    price_layers=[
+        {"mark":{"type":"rule","tooltip":True},"encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Low","type":"quantitative","scale":{"zero":False}},"y2":{"field":"High"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}},
+        {"mark":{"type":"bar","tooltip":True},"encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Open","type":"quantitative","scale":{"zero":False}},"y2":{"field":"Close"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}},
+    ]
+    line_colours={"EMA 20":"#f2a900","EMA 50":"#8b7cf6","VWAP":"#38bdf8","BB Upper":"#64748b","BB Lower":"#64748b","Support":"#24c78e","Resistance":"#ef5b64"}
+    selected_lines=[]
+    for item in overlays:
+        selected_lines += {"Bollinger Bands":["BB Upper","BB Lower"],"Support / Resistance":["Support","Resistance"]}.get(item,[item] if item in line_colours else [])
+    for column in selected_lines:
+        price_layers.append({"mark":{"type":"line","strokeWidth":1.2,"color":line_colours[column]},"encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":column,"type":"quantitative","scale":{"zero":False}}}})
+    # Entry/exit/SL/target annotations are real trade state, never synthetic.
+    annotations=[]
+    related=[t for t in st.session_state.get("final_trade_list",[]) if selected in str(getattr(t,"symbol",""))]
+    if "Trade Markers" in overlays and related:
+        trade=related[0]
+        for label, attr, colour in [("ENTRY","entry","#24c78e"),("STOP","stop","#ef5b64"),("TARGET","target1","#f2a900")]:
+            value=float(getattr(trade,attr,0) or 0)
+            if value: annotations.append({"Label":label,"Price":value})
+        if annotations:
+            price_layers.append({"data":{"values":annotations},"mark":{"type":"rule","strokeDash":[5,3]},"encoding":{"y":{"field":"Price","type":"quantitative"},"color":{"field":"Label","type":"nominal","legend":{"orient":"top"}}}})
+    candle_spec={"params":[{"name":"zoom","select":"interval","bind":"scales"}],"vconcat":[{"height":380,"layer":price_layers},{"height":100,"mark":"bar","encoding":{"x":{"field":"Timestamp","type":"temporal"},"y":{"field":"Volume","type":"quantitative"},"color":{"condition":{"test":"datum.Open <= datum.Close","value":"#24c78e"},"value":"#ef5b64"}}}],"resolve":{"scale":{"x":"shared"}}}
     st.vega_lite_chart(chart, candle_spec, use_container_width=True)
     st.caption(f"Source: {source} · Last update: {data.index[-1]} · Bid/ask and company metadata appear when supplied by the active broker. Chart supports browser zoom/pan through Vega interaction.")
 
@@ -10141,6 +10411,7 @@ def render_terminal_dashboard():
     blocked = not configured or (mode == "LIVE" and not live_ready)
     run=a.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked,key="dashboard_controls_run")
     if b.button("STOP",use_container_width=True,key="dashboard_controls_stop"):
+        get_core_runtime().stop()
         st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED")
     if c.button("EMERGENCY EXIT",use_container_width=True,key="dashboard_controls_emergency_exit"):
         st.session_state.update(emergency_exit_requested=True,autonomous_active=False,pipeline_state="BLOCKED")
@@ -10149,8 +10420,12 @@ def render_terminal_dashboard():
         MarketDataManager().update_history(st.session_state.get("scan_universe",[]),prefs.get("candle_interval","1d"))
         st.rerun()
     if run:
+        run_id, started = get_core_runtime().start({"mode": mode, "universe": configured_source,
+            "interval": prefs.get("candle_interval"), "period": prefs.get("history_period")})
         WORKSPACE.save(execution_mode=mode)
-        st.session_state.update(alphaquant_run_pending=True,pipeline_state="RUNNING")
+        st.session_state.update(alphaquant_run_pending=started,pipeline_state="STARTING",core_run_id=run_id)
+        if not started:
+            st.info(f"AlphaQuant core is already active ({run_id[:8]}). Duplicate start was ignored.")
         st.rerun()
     pipeline = st.session_state.get("pipeline_state", "STOPPED")
     ledger = _paper_ledger_metrics()
@@ -10388,6 +10663,19 @@ class YFinanceProvider(MarketDataProvider):
         short_period = "1d" if interval in ("1m", "5m", "15m", "30m", "1h") else "5d"
         return self.download_history(symbols, interval, short_period)
 
+    def download_missing_range(self, symbol, interval, start, end):
+        """Download only an explicitly missing Yahoo Finance candle range."""
+        try:
+            frame = yf.download(symbol, start=pd.Timestamp(start).date(),
+                end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date(), interval=interval,
+                progress=False, threads=False, auto_adjust=False)
+            if isinstance(frame.columns, pd.MultiIndex):
+                frame.columns = frame.columns.get_level_values(0)
+            return frame.dropna(how="all")
+        except Exception as exc:
+            logging.warning("Missing-range download failed | %s | %s", symbol, exc)
+            return pd.DataFrame()
+
     def is_market_open(self, now=None):
         return is_market_open(now)
 
@@ -10519,10 +10807,17 @@ class MarketDataManager:
                 if len(missing):
                     gaps[symbol] = [d.strftime("%Y-%m-%d") for d in missing]
         if gaps:
-            full = self.provider.download_history(list(gaps.keys()), interval, period or CONFIG.get("DOWNLOAD_PERIOD", "1y"))
-            for symbol, df in full.items():
-                self._save(symbol, interval, df)
-                repaired[symbol] = df
+            for symbol, missing_dates in gaps.items():
+                cached = repaired.get(symbol)
+                if not hasattr(self.provider, "download_missing_range") or cached is None:
+                    continue
+                missing = pd.to_datetime(missing_dates)
+                patch = self.provider.download_missing_range(symbol, interval, missing.min(), missing.max())
+                if patch is not None and not patch.empty:
+                    patch.index = pd.to_datetime(patch.index, utc=True, errors="coerce")
+                    merged = pd.concat([cached, patch]).loc[lambda x: ~x.index.duplicated(keep="last")].sort_index()
+                    self._save(symbol, interval, merged, source="Yahoo Finance missing candles")
+                    repaired[symbol] = merged
         st.session_state[self.session_key]["status"] = {"gaps": gaps, "last_repair": datetime.now()}
         logging.info("MarketDataManager repair complete | symbols=%s | gaps=%s", len(symbols), len(gaps))
         return repaired
@@ -11428,8 +11723,21 @@ def dispatch_application():
     elif page=="Positions": st.subheader("Open Positions"); st.dataframe(position_frame(),use_container_width=True,hide_index=True)
     elif page=="Holdings": st.subheader("Holdings"); st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
     elif page=="Reports":
-        st.subheader("Reports & Decision Audit"); frames={"Trade Report":get_final_trade_dataframe(),"P&L Report":pd.DataFrame([getattr(x,"__dict__",{}) for x in st.session_state.get("paper_history",[])]),"Position Report":position_frame(),"Holdings Report":holdings_frame()}
-        for name,df in frames.items(): st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode(),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv",disabled=df.empty,key=f"reports_download_{name.lower().replace(' ','_')}")
+        st.subheader("Reports & Decision Audit")
+        frames={
+            "Trade Report":get_final_trade_dataframe(),
+            "P&L Report":pd.DataFrame([getattr(x,"__dict__",{}) for x in st.session_state.get("paper_history",[])]),
+            "Position Report":position_frame(), "Holdings Report":holdings_frame(),
+            "Decision Audit":pd.DataFrame(st.session_state.get("candidate_archive", [])),
+            "Strategy Analytics":pd.DataFrame([_trade_row(t) for t in st.session_state.get("final_trade_list", [])]),
+        }
+        required={"Trade Report":["Symbol","Strategy","Status"],"P&L Report":["symbol","realized_pnl","exit_reason"],
+            "Position Report":["Symbol","Quantity","Entry","CMP"],"Holdings Report":["Symbol","Quantity","Average Cost"],
+            "Decision Audit":["Observed At","Symbol","Stage","Status","Reason"],"Strategy Analytics":["Symbol","Strategy","Confidence","Risk"]}
+        for name,df in frames.items():
+            if df.empty:
+                df=pd.DataFrame(columns=required[name])
+            st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode("utf-8-sig"),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv;charset=utf-8",key=f"reports_download_{name.lower().replace(' ','_')}")
     elif page=="Profile": render_profile()
     elif page=="Broker": render_broker_manager()
     elif page=="Symbol Details": render_symbol_details(st.session_state.get("selected_symbol"))
@@ -11437,10 +11745,22 @@ def dispatch_application():
 
 
 def main():
+    restore_trading_state_once()
+    core = get_core_runtime()
+    core_snapshot = core.snapshot()
+    if core_snapshot.get("status") in {"RUNNING", "MONITORING", "RESTORED"}:
+        st.session_state["autonomous_active"] = True
+        st.session_state["pipeline_state"] = core_snapshot["status"]
     if st.session_state.pop("alphaquant_run_pending",False):
         with st.status("Running AlphaQuant end-to-end…",expanded=True) as status:
             ok,message=AlphaQuantOrchestrator().run(trigger="MANUAL"); status.update(label=message,state="complete" if ok else "error",expanded=not ok)
         (st.success if ok else st.error)(message)
+        if ok:
+            persist_trading_state()
+            core.publish(pipeline={"state":"MONITORING","last_cycle":datetime.now(timezone.utc).isoformat()},
+                positions=_portable_value(st.session_state.get("paper_positions", {})),
+                orders=_portable_value(st.session_state.get("paper_broker", {}).get("orders", {})),
+                candidates=_portable_value(st.session_state.get("candidate_archive", []))[-1000:])
     dispatch_application()
     if st.session_state.get("autonomous_active"): autonomous_loop_fragment()
 
