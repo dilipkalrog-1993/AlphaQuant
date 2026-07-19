@@ -207,7 +207,7 @@ st.markdown(
 )
 
 # =====================================================
-# 6-TAB PAGE ROUTER
+# PROFESSIONAL WORKSPACE ROUTER
 # =====================================================
 # Sets st.session_state["_page"] via a top nav bar. Every major UI block
 # further down the file is gated by _P("PageName") so only the currently
@@ -216,9 +216,9 @@ st.markdown(
 # every engine still runs at import so the one-click pipeline behaviour
 # is preserved.
 
-_PAGE_LIST = ["Dashboard", "Scanner", "AI", "Portfolio", "Paper Trading", "Broker Manager", "Settings"]
-_PAGE_ICONS = {"Dashboard": "🏠", "Scanner": "🔭", "AI": "🧠",
-               "Portfolio": "💼", "Paper Trading": "📊", "Broker Manager": "🔌", "Settings": "⚙️"}
+_PAGE_LIST = ["Dashboard", "Profile", "Broker Manager", "Reports", "Developer Mode"]
+_PAGE_ICONS = {"Dashboard": "▣", "Profile": "●", "Broker Manager": "⇄",
+               "Reports": "≡", "Developer Mode": "⌘"}
 
 if "_page" not in st.session_state:
     st.session_state["_page"] = "Dashboard"
@@ -276,6 +276,61 @@ CONFIG = {
     "RISK_PER_TRADE": 1.0
 
 }
+
+
+class WorkspaceManager:
+    """Own the stable user workspace independently of individual widgets.
+
+    Streamlit removes widget state when a widget is not rendered.  The
+    workspace therefore keeps durable, versioned preferences in a small JSON
+    document and mirrors them into session state.  Secrets and broker tokens
+    are deliberately excluded from this store.
+    """
+
+    VERSION = 1
+    STORAGE_PATH = Path(_APP_DIR) / "data" / "workspace.json"
+    DEFAULTS = {
+        "watchlist": [],
+        "dashboard_density": "Compact",
+        "opportunity_limit": 8,
+        "minimum_confidence": 70,
+        "ai_profile": "Balanced",
+        "developer_mode": False,
+        "column_order": {},
+        "filters": {},
+        "panel_sizes": {},
+    }
+
+    def __init__(self) -> None:
+        self.STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.preferences = self._load()
+        st.session_state.setdefault("workspace_preferences", self.preferences)
+        st.session_state.setdefault("watchlist", list(self.preferences["watchlist"]))
+
+    def _load(self) -> dict[str, Any]:
+        saved: dict[str, Any] = {}
+        if self.STORAGE_PATH.exists():
+            try:
+                payload = json.loads(self.STORAGE_PATH.read_text(encoding="utf-8"))
+                if payload.get("version") == self.VERSION:
+                    saved = payload.get("preferences", {})
+            except (OSError, ValueError, TypeError) as exc:
+                logging.warning("Workspace preferences could not be loaded: %s", exc)
+        return {**self.DEFAULTS, **saved}
+
+    def save(self, **changes: Any) -> dict[str, Any]:
+        allowed = self.DEFAULTS.keys()
+        self.preferences.update({key: value for key, value in changes.items() if key in allowed})
+        self.preferences["watchlist"] = list(st.session_state.get("watchlist", []))
+        payload = {"version": self.VERSION, "preferences": self.preferences}
+        temp_path = self.STORAGE_PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(self.STORAGE_PATH)
+        st.session_state["workspace_preferences"] = self.preferences
+        return self.preferences
+
+
+WORKSPACE = WorkspaceManager()
 
 # =====================================================
 # SECTOR MAP
@@ -647,43 +702,26 @@ class PipelineDiagnostics:
 # HEADER
 # =====================================================
 
-st.title("📈 AlphaQuant Professional")
-
-st.caption(
-    "AI Assisted Long Only Trading Platform"
-)
+if _P("Dashboard"):
+    st.title("AlphaQuant Trading Workspace")
+    st.caption("AI-assisted execution, risk and portfolio control")
 
 # =====================================================
 # DASHBOARD
 # =====================================================
 
-c1, c2, c3, c4 = st.columns(4)
+if _P("Dashboard"):
+    c1, c2, c3, c4 = st.columns(4)
 
-c1.metric(
-    "Version",
-    CONFIG["VERSION"]
-)
+    c1.metric("Version", CONFIG["VERSION"])
 
-c2.metric(
-    "Scan Mode",
-    "Entire NSE"
-)
+    c2.metric("Scan Mode", "Entire NSE")
 
-c3.metric(
-    "Strategy",
-    "Long Only"
-)
+    c3.metric("Strategy", "Long Only")
 
-c4.metric(
-    "Status",
-    "Ready"
-)
+    c4.metric("Status", "Ready")
 
-st.divider()
-
-st.info(
-    "Phase 2.1 - Foundation Loaded Successfully"
-)
+    st.divider()
 
 
 # =====================================================
@@ -2024,19 +2062,14 @@ def download_market_data(symbols):
 # MARKET DATA ENGINE STATUS
 # =====================================================
 
-st.divider()
-
-st.subheader("Market Data Engine")
-
-st.caption("Market data downloads automatically when RUN ALPHAQUANT is pressed.")
-
-if st.session_state.market_data:
-
-    st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
-
-else:
-
-    st.info("No market data loaded yet. Press RUN ALPHAQUANT to build the universe and download data automatically.")
+if _P("Developer Mode"):
+    st.divider()
+    st.subheader("Market Data Engine")
+    st.caption("Market data downloads automatically when RUN ALPHAQUANT is pressed.")
+    if st.session_state.market_data:
+        st.success(f"{len(st.session_state.market_data)} symbol datasets are loaded for the latest run.")
+    else:
+        st.info("No market data loaded yet.")
 # =====================================================
 # CONFIGURATION SIDEBAR
 # VERSION 2.1D
@@ -4111,9 +4144,9 @@ def legacy_run_complete_scan():
 # SCAN BUTTON
 # =====================================================
 
-st.divider()
-
-st.subheader("AlphaQuant Scanner")
+if _P("Dashboard"):
+    st.divider()
+    st.subheader("Trading Control")
 
 
 def _pipeline_event(event):
@@ -4235,14 +4268,14 @@ def run_automated_cycle(trigger="AUTONOMOUS"):
     return run_alphaquant(trigger=trigger)
 
 
-if st.button("RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary"):
-
-    ok, msg = run_alphaquant(trigger="MANUAL")
-
-    if ok:
-        st.success(msg)
-    else:
-        st.warning(msg)
+if _P("Dashboard") and st.button(
+    "RUN ALPHAQUANT", key="run_alphaquant_primary", type="primary",
+    use_container_width=True,
+):
+    # Execution is intentionally deferred until the end of this file.  Some
+    # preserved provider classes are declared below the UI; invoking here used
+    # to produce a NameError on a user's first click.
+    st.session_state["alphaquant_run_pending"] = True
 
 # =====================================================
 # TRADE VALIDATOR ENGINE
@@ -4746,7 +4779,7 @@ def show_registered_strategies():
 # Strategy Dashboard
 # ==========================================
 
-if _P("Settings"):
+if _P("Developer Mode"):
     st.divider()
 
     st.subheader("Strategy Registry")
@@ -9877,10 +9910,11 @@ def show_mission_control():
             st.success("No pipeline errors recorded.")
 
 
-show_mission_control()
+if _P("Developer Mode"):
+    show_mission_control()
 
 # =====================================================
-# 6-TAB CONTENT ROUTER (final render area)
+# WORKSPACE CONTENT ROUTER (final render area)
 # =====================================================
 # Each show_* function below already renders a self-contained section.
 # We route them to the six tabs the user selected via the top nav bar.
@@ -9892,14 +9926,55 @@ if _P("Dashboard"):
     show_portfolio_summary()
     show_ai_summary()
 
-elif _P("Scanner"):
-    st.subheader("🔭 Scanner")
-    st.caption(
-        "The Scan Manager filters (Universe / Cap / Price / Volume / Turnover / "
-        "Sector / Style) are rendered above at the top of the app. Adjust them "
-        "and click 🚀 RUN ALPHAQUANT on the Dashboard tab to execute the full "
-        "pipeline."
+elif _P("Profile"):
+    st.subheader("Profile & Trading Preferences")
+    preferences = st.session_state["workspace_preferences"]
+    p1, p2 = st.columns(2)
+    ai_profile = p1.selectbox(
+        "AI profile", ["Conservative", "Balanced", "Aggressive"],
+        index=["Conservative", "Balanced", "Aggressive"].index(preferences["ai_profile"]),
     )
+    minimum_confidence = p2.slider(
+        "Minimum confidence", 0, 100, int(preferences["minimum_confidence"]),
+    )
+    density = p1.selectbox(
+        "Workspace density", ["Compact", "Comfortable"],
+        index=0 if preferences["dashboard_density"] == "Compact" else 1,
+    )
+    opportunity_limit = p2.number_input(
+        "Maximum opportunities", 1, 25, int(preferences["opportunity_limit"]),
+    )
+    developer_mode = st.toggle(
+        "Enable developer tools", value=bool(preferences["developer_mode"]),
+    )
+    if st.button("Save workspace", type="primary"):
+        WORKSPACE.save(
+            ai_profile=ai_profile,
+            minimum_confidence=minimum_confidence,
+            dashboard_density=density,
+            opportunity_limit=opportunity_limit,
+            developer_mode=developer_mode,
+        )
+        st.success("Workspace preferences saved.")
+
+elif _P("Reports"):
+    st.subheader("Reports")
+    st.caption("Exports preserve the decision rationale captured by the strategy and AI engines.")
+    report = get_final_trade_dataframe()
+    if report.empty:
+        st.info("Run AlphaQuant to generate a decision audit report.")
+    else:
+        st.dataframe(report, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download Decision Audit CSV", report.to_csv(index=False).encode("utf-8"),
+            file_name=f"alphaquant_decision_audit_{datetime.now():%Y%m%d}.csv",
+            mime="text/csv",
+        )
+
+elif _P("Developer Mode"):
+    if not st.session_state["workspace_preferences"].get("developer_mode"):
+        st.warning("Developer Mode is disabled. Enable it from Profile.")
+    st.subheader("Engineering Workspace")
     with st.expander("Current Scan Universe", expanded=True):
         _current = st.session_state.get("scan_universe", []) or []
         if _current:
@@ -9914,23 +9989,6 @@ elif _P("Scanner"):
         else:
             st.info("No scan list built yet. Click 🚀 RUN ALPHAQUANT on the Dashboard tab.")
 
-elif _P("AI"):
-    show_ai_summary()
-    st.divider()
-    if st.session_state.get("final_trade_list"):
-        show_ai_consensus()
-    else:
-        st.info("AI Consensus results appear here after the pipeline runs.")
-
-elif _P("Portfolio"):
-    show_portfolio_summary()
-    st.divider()
-    show_portfolio_dashboard()
-
-elif _P("Paper Trading"):
-    show_live_positions()
-
-elif _P("Settings"):
     show_alphaquant_os_panel()
 
 if st.session_state.run_complete_scan_requested:
@@ -11254,3 +11312,50 @@ if _P("Settings"):
         "Active provider: "
         + st.session_state.get("active_broker", "YFinance (default, no login)")
     )
+
+
+# =====================================================
+# CENTRAL APPLICATION ORCHESTRATOR
+# =====================================================
+
+class AlphaQuantOrchestrator:
+    """The sole UI-facing coordinator for the complete trading workflow."""
+
+    def run(self, trigger: str = "MANUAL") -> tuple[bool, str]:
+        ok, message = run_alphaquant(trigger=trigger)
+        if not ok:
+            return ok, message
+
+        try:
+            st.session_state.run_complete_scan_requested = False
+            execute_scan_pipeline()
+            monitor_open_positions()
+            SystemHealthEngine().mark("last_live_tick")
+            st.session_state.last_cycle_message = (
+                f"{len(st.session_state.final_trade_list)} trade candidate(s), "
+                f"{len(st.session_state.paper_positions)} open position(s)."
+            )
+            WORKSPACE.save()
+            return True, "AlphaQuant workflow completed. " + st.session_state.last_cycle_message
+        except Exception as exc:
+            CentralErrorManager().record_error("Run AlphaQuant", "orchestrator", exc)
+            PipelineDiagnostics().fail_phase("Run AlphaQuant", str(exc))
+            logging.exception("AlphaQuant orchestration failed")
+            return False, f"AlphaQuant stopped: {exc}"
+
+
+# The primary action is handled only after every preserved engine/provider has
+# been declared. This fixes first-click failures caused by Streamlit's
+# top-to-bottom execution model while keeping all legacy public functions.
+if st.session_state.pop("alphaquant_run_pending", False):
+    with st.status("Running AlphaQuant end-to-end…", expanded=True) as run_status:
+        _run_ok, _run_message = AlphaQuantOrchestrator().run(trigger="MANUAL")
+        run_status.update(
+            label=_run_message,
+            state="complete" if _run_ok else "error",
+            expanded=not _run_ok,
+        )
+    if _run_ok:
+        st.success(_run_message)
+    else:
+        st.error(_run_message)
