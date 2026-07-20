@@ -5803,11 +5803,15 @@ def entry_trigger_status(trade):
     average_volume = float(pd.to_numeric(frame.get("Volume"), errors="coerce").tail(20).mean() or 0)
     vwap = float(last.get("VWAP", price) or price)
     confidence = float(getattr(trade, "ai_score", getattr(trade, "confidence", 0)) or 0)
+    discovery = (WORKSPACE.preferences.get("execution_mode","PAPER") == "PAPER" and
+        WORKSPACE.preferences.get("paper_preset","PAPER NORMAL") == "PAPER DISCOVERY")
+    configured_confidence = float(WORKSPACE.preferences.get("minimum_confidence", 70))
+    paper_confidence = max(50.0, configured_confidence - 10.0) if discovery else configured_confidence
     requirements = {
         "entry price not reached": price >= entry if entry else False,
         "price below VWAP": price >= vwap,
         "volume confirmation missing": volume >= average_volume if average_volume else True,
-        "AI score below configured threshold": confidence >= float(WORKSPACE.preferences.get("minimum_confidence", 70)),
+        "AI score below configured threshold": confidence >= paper_confidence,
     }
     failed = [reason for reason, passed in requirements.items() if not passed]
     if not failed: trade.entry_status = "READY"
@@ -5829,8 +5833,22 @@ def execute_scan_pipeline():
     health = SystemHealthEngine()
     st.session_state.pipeline_started_at = st.session_state.get("pipeline_started_at") or datetime.now()
     manager = PipelineManager(on_event=_pipeline_event)
+    rejection_codes = {"NO_HISTORY","INSUFFICIENT_CANDLES","STALE_DATA","FILTERED_PRICE",
+        "FILTERED_VOLUME","FILTERED_MARKET_CAP","FILTERED_FNO","MARKET_SESSION_BLOCK",
+        "NO_STRATEGY_SIGNAL","STRATEGY_ERROR","SIGNAL_EXPIRED","OTHER"}
+    rejections, stage_counts, timings = {}, {"Universe selected":0,"Data available":0,
+        "Passed fast screen":0,"Strategy evaluated":0,"Strategy signalled":0,"AI approved":0,
+        "Risk approved":0,"Waiting for entry":0,"Executed":0}, {}
+    st.session_state["candidate_rejections"] = rejections
+    st.session_state["pipeline_stage_counts"] = stage_counts
+    st.session_state["pipeline_timings"] = timings
+
+    def reject(symbol, code, detail):
+        if symbol not in rejections:
+            rejections[symbol] = {"Symbol":symbol,"First Removal Stage":code if code in rejection_codes else "OTHER","Detail":detail}
 
     def initialize_stage():
+        started = time.perf_counter()
         # Preserve the complete decision trail before beginning a new cycle.
         # Rejected ideas are evidence, not disposable UI rows.
         archive = st.session_state.setdefault("candidate_archive", [])
@@ -5853,9 +5871,12 @@ def execute_scan_pipeline():
         fetch_nifty_benchmark()
         prefetch_news_earnings(list(st.session_state.market_data.keys()))
         _append_funnel("Universe", len(st.session_state.market_data), len(st.session_state.market_data), 0, [])
+        stage_counts["Universe selected"] = len(st.session_state.market_data)
+        timings["data readiness"] = round(time.perf_counter()-started, 4)
         return f"{len(st.session_state.market_data)} symbols initialized"
 
     def scan_stage():
+        screen_started = time.perf_counter()
         total = len(st.session_state.market_data)
         progress = st.progress(0) if total else None
         status = st.empty()
@@ -5866,6 +5887,20 @@ def execute_scan_pipeline():
             if progress:
                 progress.progress(index / total)
             status.write(f"Scanning : {symbol}")
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                reject(symbol,"NO_HISTORY","No cached candle history"); continue
+            if len(df) < 50:
+                reject(symbol,"INSUFFICIENT_CANDLES",f"{len(df)} candles; 50 required"); continue
+            stage_counts["Data available"] += 1
+            close = pd.to_numeric(df.get("Close"), errors="coerce"); volume = pd.to_numeric(df.get("Volume"), errors="coerce")
+            price = float(close.iloc[-1]) if len(close) and pd.notna(close.iloc[-1]) else 0
+            filters = WORKSPACE.preferences.get("filters", {}) or {}; price_range = filters.get("price_range", [CONFIG.get("MIN_PRICE",20), 100000])
+            if price < float(price_range[0]) or price > float(price_range[1]):
+                reject(symbol,"FILTERED_PRICE",f"price {price:.2f} outside {price_range}"); continue
+            avg_volume = float(volume.tail(20).mean()) if len(volume) else 0
+            if avg_volume < float(filters.get("minimum_volume", CONFIG.get("MIN_AVG_VOLUME",100000))):
+                reject(symbol,"FILTERED_VOLUME",f"20-candle average volume {avg_volume:.0f}"); continue
+            stage_counts["Passed fast screen"] += 1
             # Indicator computation is incremental at cycle granularity: an
             # unchanged completed candle reuses the prepared frame instead of
             # recomputing every EMA/ATR/ADX across the full history.
@@ -5879,26 +5914,31 @@ def execute_scan_pipeline():
                 if df is not None:
                     cache[symbol] = (signature, df.copy())
             if df is None:
-                candidate_reasons.append(f"{symbol}: indicator calculation failed")
+                candidate_reasons.append(f"{symbol}: indicator calculation failed"); reject(symbol,"OTHER","indicator calculation failed")
                 continue
 
             stock = get_stock(symbol)
             stock.set_dataframe(df)
             calculate_trade_quality(stock)
             processed += 1
+            stage_counts["Strategy evaluated"] += 1
             if (stock.score.get("quality") or 0) > 0:
                 quality_pass += 1
             update_market_structure(stock)
             if stock.market.get("TREND") or stock.patterns.get("BOS") or stock.patterns.get("CHOCH"):
                 structure_pass += 1
 
-            run_batch1_signal_engines(stock)
             candidates_before = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
-            run_all_strategies(stock)
-            run_batch2_signal_engines(stock)
+            try:
+                run_batch1_signal_engines(stock); run_all_strategies(stock); run_batch2_signal_engines(stock)
+            except Exception as exc:
+                reject(symbol,"STRATEGY_ERROR",f"{type(exc).__name__}: {exc}")
+                CentralErrorManager().record_error("Trade Candidate Engine", symbol, exc)
+                continue
             candidates_after = {k for k, v in st.session_state.trade_candidates.items() if v.symbol == symbol}
             if not (candidates_after - candidates_before):
-                candidate_reasons.append(f"{symbol}: no strategy setup triggered")
+                candidate_reasons.append(f"{symbol}: no strategy setup triggered"); reject(symbol,"NO_STRATEGY_SIGNAL","No enabled strategy setup triggered")
+            else: stage_counts["Strategy signalled"] += 1
 
             for trade in list(st.session_state.trade_candidates.values()):
                 if trade.symbol != symbol:
@@ -5910,15 +5950,20 @@ def execute_scan_pipeline():
         _append_funnel("Trade Quality", total, quality_pass, total - quality_pass, ["insufficient indicator/quality score"] if total - quality_pass else [])
         _append_funnel("Market Structure", processed, structure_pass, processed - structure_pass, ["trend/BOS/CHOCH structure not strong enough"] if processed - structure_pass else [])
         raw_symbols = len({t.symbol for t in st.session_state.trade_candidates.values()})
+        timings["fast screen"] = round(time.perf_counter()-screen_started, 4)
+        timings["indicator update"] = timings["fast screen"]
+        timings["strategy evaluation"] = timings["fast screen"]
         _append_funnel("Strategist", processed, raw_symbols, max(0, processed - raw_symbols), candidate_reasons[:25])
         return f"{len(st.session_state.trade_candidates)} raw candidates"
 
     def consensus_stage():
+        started = time.perf_counter()
         before = len(st.session_state.trade_candidates)
         final_list = build_ai_consensus()
         analog_reject = [t.symbol for t in final_list if (getattr(t, "analog_report", {}) or {}).get("sample_confidence") == "LOW"]
         _append_funnel("Historical Analog", before, len(final_list) - len(analog_reject), len(analog_reject), [f"{s}: Historical Analog too weak" for s in analog_reject[:25]])
         approved = [t for t in final_list if getattr(t, "risk_verdict", {}).get("verdict") == "APPROVED"]
+        stage_counts["AI approved"] = len(final_list); stage_counts["Risk approved"] = len(approved)
         risk_reasons = []
         for t in final_list:
             verdict = getattr(t, "risk_verdict", {}) or {}
@@ -5926,6 +5971,7 @@ def execute_scan_pipeline():
                 risk_reasons.append(f"{t.symbol}: {verdict.get('reason', 'Risk Manager veto')}")
         _append_funnel("Risk Manager", len(final_list), len(approved), len(final_list) - len(approved), risk_reasons[:25])
         _append_funnel("AI Consensus", before, len(final_list), max(0, before - len(final_list)), [])
+        timings["AI"] = round(time.perf_counter()-started,4); timings["risk"] = timings["AI"]
         return f"{len(final_list)} consensus candidates; {len(approved)} approved"
 
     def portfolio_stage():
@@ -5937,17 +5983,26 @@ def execute_scan_pipeline():
         return f"{len(selected)} allocated trades"
 
     def paper_stage():
+        started = time.perf_counter()
         waiting = st.session_state.setdefault("waiting_entry", {})
         triggered = 0
         for trade in st.session_state.get("selected_portfolio", []):
             valid, reason = entry_trigger_status(trade)
             waiting[trade.symbol] = {"trade": trade, "reason": reason, "updated_at": datetime.now()}
             trade.state = "READY_FOR_ENTRY" if not valid else "ENTRY_TRIGGERED"
-            if valid and trade.symbol not in st.session_state.paper_positions:
-                get_execution_engine().open_trade(trade)
-                waiting.pop(trade.symbol, None)
-                triggered += 1
+            # A closed-session scan remains useful historical analysis, but it
+            # cannot arm a stale signal for a future live fill.
+            if valid and not is_market_open():
+                trade.state = "HISTORICAL_NON_LIVE"
+                trade.entry_status = "MARKET_CLOSED_REVALIDATION_REQUIRED"
+                waiting[trade.symbol]["reason"] = "Historical signal; revalidate at market open"
+            elif valid and trade.symbol not in st.session_state.paper_positions:
+                position, _ = create_atomic_paper_trade(trade)
+                if position is not None:
+                    waiting.pop(trade.symbol, None); triggered += 1
         monitor_open_positions()
+        stage_counts["Waiting for entry"] = len(waiting); stage_counts["Executed"] = triggered
+        timings["entry monitoring"] = round(time.perf_counter()-started,4); timings["execution"] = timings["entry monitoring"]
         return f"{len(waiting)} waiting for entry; {triggered} triggered; {len(st.session_state.paper_positions)} open"
 
     def reviewer_memory_stage():
@@ -6807,6 +6862,11 @@ class PaperPosition:
     history: list = field(default_factory=list)
 
     decision_id: int | None = None
+
+    # Provenance is persisted with the position.  Validation records are
+    # deliberately distinguishable from normal paper performance.
+    source: str = "PAPER"
+    idempotency_key: str | None = None
 
     # -----------------------------------------------------
 
@@ -10435,6 +10495,46 @@ def render_pre_run_universe_filters():
     CONFIG["DOWNLOAD_PERIOD"], CONFIG["DOWNLOAD_INTERVAL"] = period, interval
 
 
+def _normalize_candles(frame):
+    if not isinstance(frame, pd.DataFrame) or frame.empty: return pd.DataFrame(columns=["Open","High","Low","Close","Volume"])
+    data=frame.copy()
+    if isinstance(data.columns,pd.MultiIndex): data.columns=data.columns.get_level_values(0)
+    data.columns=[str(c).strip().title() for c in data.columns]
+    required=["Open","High","Low","Close","Volume"]
+    if not set(required).issubset(data.columns): return pd.DataFrame(columns=required)
+    index=pd.to_datetime(data.index,utc=True,errors="coerce"); data=data.loc[~index.isna(),required]; data.index=index[~index.isna()]
+    for column in required: data[column]=pd.to_numeric(data[column],errors="coerce")
+    return data.dropna(subset=["Open","High","Low","Close"]).loc[lambda x:~x.index.duplicated(keep="last")].sort_index()
+
+
+def load_chart_candles(symbol, timeframe):
+    """Incremental chart path, independent from the autonomous scan."""
+    manager=MarketDataManager(); ticker=symbol if str(symbol).endswith(".NS") else symbol+".NS"
+    provider="persistent cache"; requested=WORKSPACE.preferences.get("history_period","1y"); rows=0
+    try:
+        cached=_normalize_candles(manager._load(ticker,timeframe))
+        # update_history fetches only the provider's latest batch and persists
+        # completed candles; unlike a quote, it never fabricates OHLC history.
+        updated=manager.update_history([ticker],timeframe).get(ticker)
+        fresh=_normalize_candles(updated); provider="Yahoo Finance incremental" if not fresh.empty else provider
+        data=_normalize_candles(pd.concat([cached,fresh])) if not cached.empty or not fresh.empty else fresh
+        rows=len(fresh)
+        if data.empty and timeframe != "1d":
+            daily=manager.get_history([ticker],"1d",requested).get(ticker)
+            fallback=_normalize_candles(daily)
+            return fallback,"daily fallback",f"{timeframe} unavailable: provider returned no normalized candles; showing 1d"
+        minimum=2 if timeframe=="1d" else 20
+        if len(data)<minimum:
+            return data,provider,f"{timeframe} has {len(data)} candles; at least {minimum} are required"
+        return data,provider,None
+    except Exception as exc:
+        diagnostic={"symbol":symbol,"timeframe":timeframe,"provider":provider,"requested range":requested,
+            "rows returned":rows,"rows after normalization":0,"exception type":type(exc).__name__,"message":str(exc)}
+        st.session_state.setdefault("chart_diagnostics",[]).append(diagnostic)
+        _developer_internal_error("chart",exc)
+        return pd.DataFrame(),provider,f"{timeframe} unavailable: {type(exc).__name__}: {exc}"
+
+
 def render_symbol_details(symbol: str | None = None):
     """Render a non-blocking symbol detail view from persistent or fallback data."""
     candidates = sorted(set(st.session_state.get("watchlist", [])) | {str(x).replace(".NS", "") for x in st.session_state.get("market_data", {})})
@@ -10453,19 +10553,21 @@ def render_symbol_details(symbol: str | None = None):
         index=["1m", "5m", "15m", "30m", "1h", "1d", "1wk"].index(WORKSPACE.preferences.get("chart_timeframe", "1d")), key="details_timeframe")
     if timeframe != WORKSPACE.preferences.get("chart_timeframe"):
         WORKSPACE.save(chart_timeframe=timeframe)
-    manager = MarketDataManager()
-    data = manager._load(selected + ".NS", timeframe)
-    if data is None or data.empty:
-        data = manager._load(selected, timeframe)
-    source = "persistent historical store"
-    if data is None or data.empty:
-        downloaded = manager.get_history([selected + ".NS"], timeframe, WORKSPACE.preferences.get("history_period", "1y"))
-        data = downloaded.get(selected + ".NS")
-        source = "YFinance provider (delayed)"
+    data, source, fallback_reason = load_chart_candles(selected, timeframe)
+    if fallback_reason: st.info(fallback_reason)
     if data is None or not isinstance(data, pd.DataFrame) or data.empty:
         st.warning("Intraday chart data is unavailable from the current provider. Try 1D or connect a broker market-data source." if timeframe != "1d" else "Daily chart data is currently unavailable for this symbol.")
         return
     data = data.tail(500).copy()
+    # A snapshot may update only the display's currently forming candle.  It is
+    # never appended to or persisted as historical OHLCV.
+    quote=get_broker_state().snapshot().get("quotes",{}).get(selected) or get_broker_state().snapshot().get("quotes",{}).get(selected+".NS")
+    if quote and timeframe != "1d" and not data.empty:
+        ltp=float(quote.get("ltp",quote.get("value",0)) or 0)
+        if ltp:
+            data.iloc[-1,data.columns.get_loc("Close")]=ltp
+            data.iloc[-1,data.columns.get_loc("High")]=max(float(data.iloc[-1]["High"]),ltp)
+            data.iloc[-1,data.columns.get_loc("Low")]=min(float(data.iloc[-1]["Low"]),ltp)
     overlays = st.multiselect("Overlays", ["EMA 20", "EMA 50", "VWAP", "Bollinger Bands", "Support / Resistance", "Trade Markers"],
         default=["EMA 20", "VWAP", "Trade Markers"], key="details_chart_overlays")
     close = pd.to_numeric(data["Close"], errors="coerce")
@@ -12161,8 +12263,182 @@ def _business_reason(value):
     raw=str(value or "").upper(); return {"AI_REJECTED":"Confidence too low","WAITING_VOLUME":"Waiting for volume confirmation","WAITING_VWAP":"Price is below VWAP","NOT_SUBMITTED":"No order submitted","WAITING_PRICE":"Waiting for entry price","STALE_DATA":"Market data is stale"}.get(raw,raw.replace("_"," ").capitalize() if raw else "No reason supplied")
 
 
+ORDER_COLUMNS = ["Order ID", "Symbol", "Side", "Quantity", "Order Type", "Price",
+    "Execution Price", "Status", "Strategy", "Source", "Created At", "Completed At"]
+CLOSED_TRADE_COLUMNS = ["Date", "Symbol", "Side", "Strategy", "Quantity", "Entry",
+    "Exit", "P&L", "P&L %", "Exit Reason", "Holding Time", "Source"]
+
+
+def _developer_internal_error(component, exc):
+    """Keep implementation failures out of the product UI unless requested."""
+    if WORKSPACE.preferences.get("developer_mode", False):
+        st.session_state.setdefault("developer_internal_errors", []).append({
+            "Time": datetime.now(timezone.utc).isoformat(), "Component": component,
+            "Exception": type(exc).__name__, "Message": str(exc),
+        })
+
+
+def _orders_frame():
+    """Return the persistent PaperBroker order ledger in a stable UI schema."""
+    rows = []
+    try:
+        orders = st.session_state.get("paper_broker", {}).get("orders", {}) or {}
+        records = orders.values() if isinstance(orders, dict) else orders
+        for raw in records:
+            if not isinstance(raw, dict):
+                continue
+            rows.append({"Order ID": raw.get("order_id", ""), "Symbol": raw.get("symbol", ""),
+                "Side": raw.get("side", ""), "Quantity": raw.get("qty", raw.get("quantity", 0)),
+                "Order Type": raw.get("order_type", "MARKET"), "Price": raw.get("price", raw.get("ltp")),
+                "Execution Price": raw.get("execution_price"), "Status": raw.get("status", "UNKNOWN"),
+                "Strategy": raw.get("strategy", raw.get("tag", "")), "Source": raw.get("source", "PAPER"),
+                "Created At": raw.get("timestamp", raw.get("created_at")), "Completed At": raw.get("completed_at")})
+    except Exception as exc:
+        _developer_internal_error("_orders_frame", exc)
+    return pd.DataFrame(rows, columns=ORDER_COLUMNS)
+
+
+def _closed_trades_frame(include_validation=False):
+    """Return restored PaperPosition history; validation is opt-in for reports."""
+    rows = []
+    try:
+        for trade in st.session_state.get("paper_history", []) or []:
+            get = lambda name, default=None: trade.get(name, default) if isinstance(trade, dict) else getattr(trade, name, default)
+            source = str(get("source", "PAPER") or "PAPER")
+            if source == "PAPER_VALIDATION" and not include_validation:
+                continue
+            entry, exit_price = float(get("entry", 0) or 0), float(get("current_price", get("exit_price", 0)) or 0)
+            qty, pnl = int(get("qty", get("quantity", 0)) or 0), float(get("realized_pnl", get("pnl", 0)) or 0)
+            entered, exited = get("entry_time"), get("exit_time")
+            duration = ""
+            try:
+                if entered and exited: duration = str(pd.to_datetime(exited) - pd.to_datetime(entered)).split(".")[0]
+            except (TypeError, ValueError):
+                pass
+            rows.append({"Date": exited, "Symbol": get("symbol", ""), "Side": "BUY",
+                "Strategy": get("strategy", ""), "Quantity": qty, "Entry": entry, "Exit": exit_price,
+                "P&L": pnl, "P&L %": pnl / (entry * qty) * 100 if entry and qty else 0,
+                "Exit Reason": get("exit_reason", ""), "Holding Time": duration, "Source": source})
+    except Exception as exc:
+        _developer_internal_error("_closed_trades_frame", exc)
+    return pd.DataFrame(rows, columns=CLOSED_TRADE_COLUMNS)
+
+
+def _paper_validation_lifecycle(quantity=1):
+    """Exercise paper bookkeeping end-to-end without touching broker routing."""
+    stages = []
+    def stage(name, passed, detail=""):
+        stages.append({"Stage": name, "Result": "PASS" if passed else "FAIL", "Detail": detail})
+        if not passed: raise RuntimeError(f"{name}: {detail}")
+    run_id = "paper-validation-" + uuid.uuid4().hex[:10]
+    symbol, strategy, side = "AQVALID", "PAPER LIFECYCLE", "BUY"
+    signal_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    key = hashlib.sha256(f"{run_id}|{symbol}|{strategy}|{signal_time}|{side}".encode()).hexdigest()
+    try:
+        stage("Candidate", True, "deterministic synthetic candidate")
+        stage("Fast AI approval", True, "local deterministic validation gate")
+        stage("Risk approval", quantity > 0 and quantity <= 10, f"tiny quantity={quantity}")
+        stage("Entry ready", True, "synthetic fresh quote")
+        ledger = st.session_state.setdefault("paper_broker", {"connected":False,"cash":500000.0,
+            "starting_capital":500000.0,"positions":{},"orders":{},"trade_history":[],"realized_pnl":0.0,"risk":{}})
+        ledger.setdefault("orders", {}); ledger.setdefault("trade_history", [])
+        if any(o.get("idempotency_key") == key for o in ledger["orders"].values() if isinstance(o, dict)):
+            stage("Duplicate protection", False, "idempotency key already exists")
+        entry, stop, target = 100.0, 99.0, 102.0
+        order_id = "PV-" + key[:12]
+        order = {"order_id":order_id,"idempotency_key":key,"symbol":symbol,"side":side,"qty":int(quantity),
+            "price":entry,"execution_price":entry,"order_type":"MARKET","status":"COMPLETE",
+            "strategy":strategy,"source":"PAPER_VALIDATION","timestamp":datetime.now(timezone.utc),
+            "completed_at":datetime.now(timezone.utc)}
+        ledger["orders"][order_id] = order; ledger["trade_history"].append(dict(order))
+        stage("Simulated order", order_id in ledger["orders"]); stage("Simulated fill", order["status"] == "COMPLETE")
+        position = PaperPosition(symbol=symbol, strategy=strategy, qty=int(quantity), entry=entry,
+            stop=stop, target1=target, confidence=100, ai_score=100, source="PAPER_VALIDATION", idempotency_key=key)
+        position.initialise(); st.session_state.setdefault("paper_positions", {})[symbol] = position
+        ledger["cash"] = float(ledger.get("cash", 0)) - entry * quantity
+        stage("Open position", st.session_state.paper_positions.get(symbol) is position)
+        stage("Capital reservation", entry * quantity > 0, f"reserved ₹{entry * quantity:.2f}")
+        position.update_price(target); stage("Price update", position.current_price == target)
+        position.close_trade("VALIDATION TARGET", target); stage("Stop/target exit", position.status == "CLOSED")
+        st.session_state.paper_positions.pop(symbol, None); st.session_state.setdefault("paper_history", []).append(position)
+        ledger["cash"] += target * quantity; ledger["realized_pnl"] = float(ledger.get("realized_pnl", 0)) + position.realized_pnl
+        stage("Closed trade", position in st.session_state.paper_history)
+        stage("Realized P&L", position.realized_pnl == (target-entry)*quantity, f"₹{position.realized_pnl:.2f}")
+        persist_trading_state(); stage("Persistence", PAPER_STATE_PATH.exists(), str(PAPER_STATE_PATH))
+        saved = json.loads(PAPER_STATE_PATH.read_text(encoding="utf-8"))
+        restored = any(x.get("idempotency_key") == key for x in saved.get("paper_history", []) if isinstance(x, dict))
+        stage("Restart restoration", restored, "serialized state re-read from disk")
+    except Exception as exc:
+        if not stages or stages[-1]["Result"] != "FAIL": stages.append({"Stage":"Lifecycle", "Result":"FAIL", "Detail":f"{type(exc).__name__}: {exc}"})
+        _developer_internal_error("paper_validation", exc)
+    result = {"run_id":run_id, "idempotency_key":key, "passed":all(x["Result"] == "PASS" for x in stages), "stages":stages}
+    st.session_state["paper_validation_result"] = result
+    return result
+
+
+def _cleanup_paper_validation():
+    ledger = st.session_state.get("paper_broker", {})
+    ledger["orders"] = {k:v for k,v in (ledger.get("orders", {}) or {}).items() if v.get("source") != "PAPER_VALIDATION"}
+    ledger["trade_history"] = [v for v in ledger.get("trade_history", []) if v.get("source") != "PAPER_VALIDATION"]
+    st.session_state["paper_history"] = [v for v in st.session_state.get("paper_history", []) if getattr(v,"source",None) != "PAPER_VALIDATION"]
+    st.session_state["paper_positions"] = {k:v for k,v in st.session_state.get("paper_positions",{}).items() if getattr(v,"source",None) != "PAPER_VALIDATION"}
+    st.session_state.pop("paper_validation_result", None); persist_trading_state()
+
+
+def _paper_idempotency_key(trade):
+    run_id = get_core_runtime().snapshot().get("run_id") or st.session_state.get("pipeline_run_id", "manual")
+    signal_time = getattr(trade, "signal_time", getattr(trade, "created_at", "unknown"))
+    raw = f"{run_id}|{getattr(trade,'symbol','')}|{getattr(trade,'strategy','')}|{signal_time}|BUY"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def create_atomic_paper_trade(trade):
+    """Create order, fill, position, reservation and audit exactly once."""
+    if WORKSPACE.preferences.get("execution_mode", "PAPER") != "PAPER":
+        return None, "Paper execution is disabled"
+    key = _paper_idempotency_key(trade)
+    ledger = st.session_state.setdefault("paper_broker", {})
+    orders = ledger.setdefault("orders", {})
+    if any(isinstance(o, dict) and o.get("idempotency_key") == key for o in orders.values()):
+        return None, "Duplicate evaluation blocked"
+    symbol = getattr(trade, "symbol", "")
+    if symbol in st.session_state.setdefault("paper_positions", {}):
+        return None, "Position already exists"
+    discovery = WORKSPACE.preferences.get("paper_preset","PAPER NORMAL") == "PAPER DISCOVERY"
+    if discovery and len(st.session_state.get("paper_positions",{})) >= 2: return None, "Discovery position limit reached"
+    qty = int(getattr(trade, "position_size", 0) or 0); entry = float(getattr(trade, "entry", 0) or 0)
+    if discovery: qty=max(1,qty//2)
+    if qty <= 0 or entry <= 0: return None, "Invalid paper quantity or entry"
+    order_id = "PAPER-" + key[:16]; now = datetime.now(timezone.utc)
+    order = {"order_id":order_id,"idempotency_key":key,"symbol":symbol,"side":"BUY","qty":qty,
+        "price":entry,"execution_price":entry,"order_type":"MARKET","status":"COMPLETE",
+        "strategy":getattr(trade,"strategy",""),"source":"PAPER","timestamp":now,"completed_at":now}
+    position = PaperPosition(symbol=symbol,strategy=getattr(trade,"strategy",""),qty=qty,entry=entry,
+        stop=float(getattr(trade,"stop",0) or 0),target1=float(getattr(trade,"target1",0) or 0),
+        target2=float(getattr(trade,"target2",0) or 0),target3=float(getattr(trade,"target3",0) or 0),
+        confidence=int(getattr(trade,"confidence",0) or 0),ai_score=int(getattr(trade,"ai_score",0) or 0),
+        decision_id=getattr(trade,"decision_id",None),source="PAPER",idempotency_key=key)
+    position.initialise()
+    # Mutate the existing persistent ledger only after every object validates.
+    orders[order_id] = order; ledger.setdefault("trade_history", []).append(dict(order))
+    ledger["cash"] = float(ledger.get("cash", WORKSPACE.preferences["paper_trading_capital"])) - qty*entry
+    ledger.setdefault("positions", {})[symbol] = {"symbol":symbol,"qty":qty,"avg_price":entry,"source":"PAPER"}
+    st.session_state.paper_positions[symbol] = position
+    st.session_state.setdefault("paper_audit", []).append({"time":now,"event":"ATOMIC_PAPER_FILL","order_id":order_id,"idempotency_key":key})
+    persist_trading_state()
+    return position, "Paper order filled"
+
+
 def render_trading_page():
-    st.header("TRADING"); tabs=st.tabs(["POSITIONS","HOLDINGS","TRADE SETUPS","REJECTED","ORDERS","CLOSED TRADES"])
+    st.header("TRADING")
+    if WORKSPACE.preferences.get("execution_mode","PAPER") == "PAPER":
+        preset=st.radio("Paper preset",["PAPER NORMAL","PAPER DISCOVERY"],horizontal=True,
+            index=1 if WORKSPACE.preferences.get("paper_preset","PAPER NORMAL")=="PAPER DISCOVERY" else 0,key="paper_preset")
+        if preset != WORKSPACE.preferences.get("paper_preset","PAPER NORMAL"): WORKSPACE.save(paper_preset=preset)
+        if preset == "PAPER DISCOVERY":
+            st.info("Discovery mode uses relaxed paper-only selection rules for testing and data collection. It never changes Live defaults.")
+            st.caption("Long only · maximum 2 positions · reduced size · stop loss, reward/risk, stale-data and expiry protections retained.")
+    tabs=st.tabs(["POSITIONS","HOLDINGS","TRADE SETUPS","REJECTED","ORDERS","CLOSED TRADES"])
     pos=position_frame(); hold=holdings_frame(); orders=_orders_frame(); closed=_closed_trades_frame(); source=_normal_opportunity_frame(filtered_opportunities(WORKSPACE.preferences.get("filters",{})))
     frames=[pos,hold,None,None,orders,closed]; messages=["No open positions.","No holdings.","","","No orders.","No closed trades."]
     for index in [0,1,4,5]:
@@ -12179,6 +12455,27 @@ def render_trading_page():
         rejected=source[source["Status"]=="REJECTED"].copy()
         if not rejected.empty: rejected["Reason"]=rejected["Reason"].map(_business_reason); st.dataframe(rejected,use_container_width=True,hide_index=True)
         else: _empty_state("No rejected candidates.")
+    counts=st.session_state.get("pipeline_stage_counts",{})
+    if counts and not len(st.session_state.get("final_trade_list",[])):
+        reviewed=counts.get("Universe selected",0); available=counts.get("Data available",0); screened=counts.get("Passed fast screen",0); signalled=counts.get("Strategy signalled",0)
+        state="MARKET CLOSED" if not is_market_open() else ("DATA UNAVAILABLE" if not available else "NO CANDIDATES")
+        st.info(f"**{state}** — No valid setups were found.\n\n{reviewed} symbols reviewed · {available} had sufficient history · {screened} passed initial screening · {signalled} met strategy conditions")
+    if WORKSPACE.preferences.get("developer_mode",False):
+        with st.expander("Developer · candidate funnel and paper validation",expanded=False):
+            if counts: st.dataframe(pd.DataFrame([{"Stage":k,"Count":v} for k,v in counts.items()]),hide_index=True,use_container_width=True)
+            rejected=st.session_state.get("candidate_rejections",{})
+            if rejected: st.dataframe(pd.DataFrame(rejected.values()),hide_index=True,use_container_width=True)
+            timings=st.session_state.get("pipeline_timings",{})
+            if timings: st.dataframe(pd.DataFrame([{"Stage":k,"Seconds":v} for k,v in timings.items()]),hide_index=True,use_container_width=True)
+            a,b=st.columns(2)
+            if a.button("RUN PAPER LIFECYCLE TEST",type="primary",key="run_paper_lifecycle"):
+                _paper_validation_lifecycle(int(WORKSPACE.preferences.get("paper_validation_quantity",1)))
+            if b.button("CLEAN UP VALIDATION RECORDS",key="cleanup_paper_validation"):
+                _cleanup_paper_validation(); st.success("Validation-only records removed.")
+            result=st.session_state.get("paper_validation_result")
+            if result:
+                (st.success if result["passed"] else st.error)("Paper lifecycle PASS" if result["passed"] else "Paper lifecycle FAIL")
+                st.dataframe(pd.DataFrame(result["stages"]),hide_index=True,use_container_width=True)
 
 
 def render_reports_page():
