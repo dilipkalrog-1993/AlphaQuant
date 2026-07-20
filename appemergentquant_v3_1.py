@@ -34,6 +34,7 @@ import time
 import uuid
 import hashlib
 import json
+import math
 import threading
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
@@ -248,7 +249,12 @@ input:disabled, textarea:disabled, [aria-disabled="true"] {color:#b8c3d2!importa
 [data-testid="stToggle"] label, [data-testid="stSlider"] label {color:#d9e2ef!important}
 [data-testid="stAlert"] {background:#111c2b!important;color:#eef4fc!important;border:1px solid #41536b!important}
 [data-testid="stAlert"] * {color:#eef4fc!important}
-[data-testid="stDataFrame"] canvas {background:#0d1420!important;color:#eef4fc!important}
+[data-testid="stDataFrame"], [data-testid="stDataEditor"], [data-testid="stTable"] {background:#0d1420!important;color:#eef4fc!important;border-color:#2a3547!important}
+[data-testid="stDataFrame"] canvas, [data-testid="stDataEditor"] canvas {background:#0d1420!important;color:#eef4fc!important}
+[data-testid="stDataFrame"] [role="grid"], [data-testid="stDataEditor"] [role="grid"], [role="columnheader"], [role="gridcell"] {background:#0d1420!important;color:#eef4fc!important;border-color:#2a3547!important}
+[role="row"][aria-selected="true"] [role="gridcell"] {background:#20334b!important;color:#fff!important}
+.aq-empty{background:#0d1420;border:1px solid #2a3547;color:#aebbd0;padding:22px;text-align:center;font-size:12px}
+.aq-status-card{display:grid;grid-template-columns:minmax(150px,.7fr) 1.3fr;background:#0d1420;border:1px solid #2a3547;padding:10px;gap:7px 18px;font-size:12px}.aq-status-card b{color:#aebbd0;text-transform:uppercase;font-size:10px}.aq-status-card span{color:#eef4fc}
 [data-testid="stExpander"] summary, [data-testid="stTooltipIcon"], [data-testid="stMarkdownContainer"] {color:#d9e2ef!important}
 [role="radiogroup"] label, [data-testid="stDownloadButton"] button {color:#eef4fc!important}
 [data-testid="stNumberInput"] button, [data-testid="stDateInput"] button, [data-testid="stTimeInput"] button {color:#f4f7fb!important;background:#182437!important}
@@ -260,12 +266,12 @@ hr{margin:.35rem 0!important;border-color:var(--aq-line)!important} #MainMenu,fo
 
 st.markdown(f'<div class="aq-brand"><b>ALPHAQUANT TERMINAL</b><span>MARKETS · RESEARCH · EXECUTION · RISK · <b>{st.session_state.get("pipeline_state", "STOPPED")}</b></span></div>', unsafe_allow_html=True)
 
-# Compact top navigation. Developer is absent until explicitly enabled in Profile.
-_BASE_PAGES = ["Setup & Connect", "Dashboard", "Watchlist", "Positions", "Holdings", "Charts", "Reports", "Profile"]
-if st.session_state.get("selected_symbol"):
-    _BASE_PAGES.append("Symbol Details")
+# Product navigation deliberately contains no implementation or object-level pages.
+# Symbol details are rendered contextually inside Market and diagnostics are opened
+# from Settings only after the user explicitly enables Developer Mode.
+_BASE_PAGES = ["Setup", "Dashboard", "Market", "Portfolio", "Reports", "Settings"]
 _developer_enabled = bool(st.session_state.get("workspace_preferences", {}).get("developer_mode", False))
-_PAGE_LIST = _BASE_PAGES + (["Developer"] if _developer_enabled else [])
+_PAGE_LIST = _BASE_PAGES
 if st.session_state.get("_page") not in _PAGE_LIST:
     # Route before constructing any expensive page.  A persisted universe is
     # the minimum configuration for Paper; Live additionally validates the
@@ -279,8 +285,8 @@ if st.session_state.get("_page") not in _PAGE_LIST:
     except (OSError, ValueError, TypeError):
         pass
     _runtime_active = get_core_runtime().snapshot().get("status") in {"RUNNING", "MONITORING", "RESTORED"}
-    st.session_state["_page"] = "Dashboard" if (_workspace_ready or _runtime_active) else "Setup & Connect"
-_nav_cols = st.columns([1] * len(_BASE_PAGES) + ([.8] if _developer_enabled else []))
+    st.session_state["_page"] = "Dashboard" if (_workspace_ready or _runtime_active) else "Setup"
+_nav_cols = st.columns([1] * len(_BASE_PAGES))
 for _i, _pname in enumerate(_PAGE_LIST):
     with _nav_cols[_i]:
         if st.button(_pname.upper(), key=f"_nav_btn_{_pname}", use_container_width=True,
@@ -289,7 +295,9 @@ for _i, _pname in enumerate(_PAGE_LIST):
             st.rerun()
 
 def _P(*pages) -> bool:
-    aliases = {"Broker Manager":"Broker", "Developer Mode":"Developer"}
+    # Legacy developer workspaces remain in the file for diagnostics but are
+    # never directly routable. Settings owns their explicit, gated surface.
+    aliases = {"Setup & Connect":"Setup", "Profile":"Settings", "Developer Mode":"__LEGACY_DEVELOPER_ROUTE__"}
     return st.session_state.get("_page", "Dashboard") in {aliases.get(p,p) for p in pages}
 
 # =====================================================
@@ -10143,27 +10151,29 @@ def refresh_terminal_quotes(force=False):
     return quotes
 
 def render_ticker_strip():
+    """Render the same compact, product-safe market strip below every route."""
     quotes=refresh_terminal_quotes(False); broker_state=get_broker_state().snapshot()
     source=broker_state.get("data_source","UNAVAILABLE")
-    cells=[]
+    cells=[]; ages=[]; stamps=[]
     for name in _INDEX_TICKERS:
         q=quotes.get(name); raw_time=q.get("received_at") if q else None
         if isinstance(raw_time,str): raw_time=pd.to_datetime(raw_time,utc=True,errors="coerce")
-        age=max(0,(datetime.now(timezone.utc)-raw_time.to_pydatetime()).total_seconds()) if isinstance(raw_time,pd.Timestamp) else max(0,(datetime.now(timezone.utc)-raw_time).total_seconds()) if isinstance(raw_time,datetime) and raw_time.tzinfo else 999999
-        stale_after=10 if source=="BROKER_LIVE" else 30 if source=="BROKER_SNAPSHOT" else 300
-        quote_status="OFFLINE" if not q else "DELAYED" if source=="YFINANCE_INTRADAY_FALLBACK" else "STALE" if age>stale_after else "LIVE" if source=="BROKER_LIVE" else "NEAR LIVE"
-        value_raw=q.get("ltp",q.get("value")) if q else None; value=f"{value_raw:,.2f}" if value_raw is not None else "—"; change=q.get("change",0) if q else 0; pct=q.get("change_percent",q.get("pct",0)) if q else 0
-        cls="aq-up" if change>=0 else "aq-down"
-        stamp=raw_time.strftime("%H:%M:%S") if raw_time is not None and hasattr(raw_time,"strftime") else "—"
-        cells.append(f'<div class="aq-tick"><strong>{name} · {quote_status}</strong>{value} <span class="{cls}">{change:+.2f} ({pct:+.2f}%)</span><br><small>{stamp} · age {age:.1f}s</small></div>')
+        if isinstance(raw_time,pd.Timestamp): raw_time=raw_time.to_pydatetime()
+        if isinstance(raw_time,datetime):
+            if raw_time.tzinfo is None: raw_time=raw_time.replace(tzinfo=timezone.utc)
+            ages.append(max(0,(datetime.now(timezone.utc)-raw_time).total_seconds())); stamps.append(raw_time)
+        value_raw=q.get("ltp",q.get("value")) if q else None
+        value=f"{value_raw:,.2f}" if value_raw is not None else "—"
+        change=float(q.get("change",0) or 0) if q else 0; pct=float(q.get("change_percent",q.get("pct",0)) or 0) if q else 0
+        cells.append(f'<div class="aq-tick"><strong>{name}</strong>{value} <span class="{"aq-up" if change>=0 else "aq-down"}">{change:+.2f} ({pct:+.2f}%)</span></div>')
     st.markdown('<div class="aq-ticker">'+''.join(cells)+'</div>',unsafe_allow_html=True)
-    status=market_status(); opened=status=="OPEN"
-    advances=sum(1 for q in quotes.values() if q["change"]>0); declines=sum(1 for q in quotes.values() if q["change"]<0)
-    breadth="POSITIVE" if advances>declines else "NEGATIVE" if declines>advances else "NEUTRAL"
-    regime=st.session_state.get("market_regime",breadth)
-    label={"BROKER_LIVE":"Upstox Live","BROKER_SNAPSHOT":"Upstox snapshot","YFINANCE_INTRADAY_FALLBACK":"Yahoo Finance delayed fallback","HISTORICAL_CACHE":"Historical only","UNAVAILABLE":"Unavailable"}.get(source,source)
-    last=broker_state.get("last_quote_time"); last_text=last.strftime("%H:%M:%S") if hasattr(last,"strftime") else "Never"
-    st.markdown(f'<div class="aq-status"><b class="{"aq-up" if opened else "aq-down"}">MARKET {status}</b><span>A/D {advances}/{declines}</span><span>BREADTH {breadth}</span><span>REGIME {regime}</span><span>BROKER {broker_state["health_status"]}</span><span>SOURCE {label}</span><span>LAST TICK {last_text}</span></div>',unsafe_allow_html=True)
+    age=max(ages) if ages else None
+    data_status=("OFFLINE" if not quotes else "DELAYED" if source=="YFINANCE_INTRADAY_FALLBACK" else
+        "STALE" if age is not None and age>(10 if source=="BROKER_LIVE" else 30) else
+        "LIVE" if source=="BROKER_LIVE" else "NEAR LIVE" if source=="BROKER_SNAPSHOT" else "STALE")
+    label={"BROKER_LIVE":"UPSTOX","BROKER_SNAPSHOT":"UPSTOX SNAPSHOT","YFINANCE_INTRADAY_FALLBACK":"YAHOO FINANCE FALLBACK","HISTORICAL_CACHE":"HISTORICAL CACHE","UNAVAILABLE":"UNAVAILABLE"}.get(source,"UNAVAILABLE")
+    last=max(stamps).strftime("%H:%M:%S") if stamps else "NEVER"; age_text=f"{age:.0f}s" if age is not None else "N/A"
+    st.markdown(f'<div class="aq-status"><b>MARKET {market_status()}</b><span>DATA {data_status}</span><span>SOURCE {label}</span><span>LAST UPDATE {last}</span><span>QUOTE AGE {age_text}</span></div>',unsafe_allow_html=True)
 
 # Fragment reruns only this lightweight snapshot renderer; it never invokes the
 # strategy pipeline or constructs a second quote worker.
@@ -10231,50 +10241,58 @@ def filtered_opportunities(filters):
         out.append(row)
     return pd.DataFrame(out)
 
+def _normalized_confidence(raw):
+    """Bound product confidence while retaining the raw engine score elsewhere."""
+    try:
+        score=max(0.0,float(raw or 0))
+    except (TypeError,ValueError):
+        return 0
+    # Engine scores over 100 have diminishing product meaning; preserve ordering.
+    return int(round(min(100.0, score if score <= 100 else 100*(1-math.exp(-score/83.0)))))
+
+
+def _opportunity_status(row):
+    ai=str(row.get("AI Status","")).upper(); risk=str(row.get("Risk Status","")).upper()
+    entry=str(row.get("Entry Status","")).upper(); execution=str(row.get("Execution Status","")).upper()
+    if execution in {"FILLED","EXECUTED","COMPLETE","COMPLETED"}: return "EXECUTED", "Trade was taken"
+    if entry in {"EXPIRED","STALE_DATA"}: return "EXPIRED", "Signal is no longer current"
+    if ai in {"REJECTED","VETOED"}: return "REJECTED", "Confidence too low"
+    if risk in {"REJECTED","VETOED","NOT_EVALUATED"}: return "REJECTED", row.get("Risk Reason") or "Did not pass risk checks"
+    if entry=="WAITING_VOLUME": return "WAITING FOR ENTRY", "Waiting for volume confirmation"
+    if entry in {"WAITING_PRICE","WAITING_VWAP"}: return "WAITING FOR ENTRY", "Waiting for entry price"
+    if risk=="APPROVED" and entry in {"READY","TRIGGERED","APPROVED"}: return "READY", "Entry conditions are met"
+    return "WATCHING", "Monitoring entry conditions"
+
+
+def _normal_opportunity_frame(df):
+    columns=["Symbol","Side","Strategy","Current Price","Entry","Stop","Target","Confidence","Status","Reason","Action"]
+    if df.empty: return pd.DataFrame(columns=columns)
+    rows=[]
+    for _,row in df.iterrows():
+        status,reason=_opportunity_status(row)
+        rows.append({"Symbol":row.get("Symbol",""),"Side":row.get("Side",""),"Strategy":row.get("Strategy",""),
+            "Current Price":row.get("CMP"),"Entry":row.get("Entry"),"Stop":row.get("Stop"),"Target":row.get("Target"),
+            "Confidence":f"{_normalized_confidence(row.get('AI Score',row.get('Confidence',0)))}%",
+            "Status":status,"Reason":reason,"Action":"Review"})
+    return pd.DataFrame(rows,columns=columns)
+
+
 def render_opportunities():
-    st.markdown('<div class="aq-panel-title">Strategy Candidates</div>',unsafe_allow_html=True)
-    final = st.session_state.get("final_trade_list", [])
-    archive = st.session_state.get("candidate_archive", [])
-    potential = len(st.session_state.get("trade_candidates", {}))
-    approved = sum(1 for t in final if (getattr(t,"risk_verdict",{}) or {}).get("verdict") == "APPROVED")
-    rejected = sum(1 for t in final if (getattr(t,"risk_verdict",{}) or {}).get("verdict") in {"VETOED","REJECTED","NOT_EVALUATED"})
-    executed = len(st.session_state.get("paper_history", [])) + len(st.session_state.get("paper_positions", {}))
-    for col, (label, value) in zip(st.columns(4), [("Strategy Candidates", potential),("AI / Risk Approved",approved),("Rejected",rejected),("Executed",executed)]):
-        col.metric(label, value)
-    waiting = len(st.session_state.get("waiting_entry", {}))
-    ai_approved=sum(1 for t in final if float(getattr(t,"ai_score",getattr(t,"confidence",0)) or 0)>=float(WORKSPACE.preferences.get("minimum_fast_ai_score",70)))
-    funnel_counts = [("Universe",len(st.session_state.get("scan_universe",[]))),("Data Ready",len(st.session_state.get("market_data",{}))),
-        ("Strategy Candidates",potential),("AI Approved",ai_approved),("AI Rejected",max(0,len(final)-ai_approved)),
-        ("Risk Approved",approved),("Risk Rejected",rejected),("Waiting for Entry",waiting),
-        ("Executed",executed),("Open Positions",len(st.session_state.get("paper_positions",{}))),("Closed Trades",len(st.session_state.get("paper_history",[])))]
-    st.caption("  →  ".join(f"{name} **{count}**" for name,count in funnel_counts))
-    filters=opportunity_filters(); df=filtered_opportunities(filters)
-    generated=potential or len(final)
-    visible=len(df); st.caption(f"{generated} candidates generated · {visible} visible · {max(0,generated-visible)} hidden by filters")
-    if df.empty and generated:
-        st.warning(f"{generated} candidates exist, but all are hidden by the current filters. Use Reset Filters above.")
-    elif df.empty: st.caption("No strategy candidates were generated in the current run.")
-    else: st.dataframe(df,use_container_width=True,hide_index=True,height=min(300,38+35*len(df)))
-    st.info("A candidate is not a position. A position exists only after AI approval → Risk approval → Entry trigger → Order submission → Fill confirmation.")
-    reason_rows=[]
-    for trade in final:
-        row=_trade_row(trade)
-        for status_key,reason_key in [("AI Status","AI Reason"),("Risk Status","Risk Reason"),("Entry Status","Entry Reason"),("Execution Status","Execution Status")]:
-            if row[status_key] in {"REJECTED","VETOED","PENDING","WATCHLIST","NOT_SUBMITTED","WAITING_PRICE","WAITING_VOLUME","WAITING_VWAP","WAITING_AI_SCORE","STALE_DATA"}:
-                reason_rows.append(row[reason_key] or row[status_key])
-    if reason_rows:
-        st.markdown('<div class="aq-panel-title">Rejection and Blocking Summary</div>',unsafe_allow_html=True)
-        st.dataframe(pd.Series(reason_rows).value_counts().rename_axis("Reason").reset_index(name="Count"),use_container_width=True,hide_index=True)
-    trades=st.session_state.get("final_trade_list",[])
-    if trades:
-        selected=st.selectbox("Why?",[getattr(t,"symbol","") for t in trades],key="why_trade")
-        trade=next(t for t in trades if getattr(t,"symbol","")==selected); verdict=getattr(trade,"risk_verdict",{}) or {}; reasons=getattr(trade,"reasons",[]) or []
-        with st.expander(f"Decision rationale · {selected}"):
-            labels=["Technical reason","Volume reason","Trend reason","Momentum reason","Sector reason","Market-regime reason","AI reason","Risk result","Portfolio-allocation result","News / sentiment factor","Final decision rationale"]
-            for i,label in enumerate(labels): st.write(f"**{label}:** {reasons[i] if i<len(reasons) else verdict.get('reason','No adverse factor recorded by the active engines.')}")
-    if archive:
-        with st.expander(f"Decision archive · {len(archive)} retained candidates"):
-            st.dataframe(pd.DataFrame(archive).tail(500), use_container_width=True, hide_index=True)
+    st.markdown('<div class="aq-panel-title">Opportunities</div>',unsafe_allow_html=True)
+    final=st.session_state.get("final_trade_list",[]); potential=len(st.session_state.get("trade_candidates",{}))
+    source=filtered_opportunities(opportunity_filters()); normal=_normal_opportunity_frame(source)
+    passed_analysis=sum(_normalized_confidence(getattr(t,"ai_score",getattr(t,"confidence",0))) >= 70 for t in final)
+    passed_risk=sum((getattr(t,"risk_verdict",{}) or {}).get("verdict")=="APPROVED" for t in final)
+    tabs=st.tabs(["ACTIONABLE","WATCHING","REJECTED","ALL"])
+    filters=[normal[normal["Status"]=="READY"],normal[normal["Status"].isin(["WATCHING","WAITING FOR ENTRY"])],normal[normal["Status"]=="REJECTED"],normal]
+    for i,(tab,frame) in enumerate(zip(tabs,filters)):
+        with tab:
+            if frame.empty:
+                message="No trade is ready for execution." if i==0 else {1:"No opportunities are being watched.",2:"No rejected opportunities.",3:"No opportunities are available."}[i]
+                st.markdown(f'<div class="aq-empty">{message}</div>',unsafe_allow_html=True)
+                if i==0: st.caption(f"{potential} candidates reviewed · {passed_analysis} passed analysis · {passed_risk} passed risk checks · 0 met final entry conditions")
+            else: st.dataframe(frame,use_container_width=True,hide_index=True,height=min(360,38+35*len(frame)))
+    st.info("A candidate is not a position. A position exists only after an order is submitted and filled.")
 
 def _watchlist_quotes(symbols):
     rows=[]
@@ -10434,10 +10452,10 @@ def render_pre_run_universe_filters():
 def render_symbol_details(symbol: str | None = None):
     """Render a non-blocking symbol detail view from persistent or fallback data."""
     candidates = sorted(set(st.session_state.get("watchlist", [])) | {str(x).replace(".NS", "") for x in st.session_state.get("market_data", {})})
-    if not candidates:
-        st.info("Add a symbol to a watchlist or run AlphaQuant to open Symbol Details.")
-        return
     selected = symbol or st.session_state.get("selected_symbol")
+    if not candidates and not selected:
+        st.info("Search for a symbol or add one to a watchlist to view its chart.")
+        return
     if not selected:
         st.info("Choose a symbol from Watchlist to open Symbol Details.")
         return
@@ -10459,7 +10477,7 @@ def render_symbol_details(symbol: str | None = None):
         data = downloaded.get(selected + ".NS")
         source = "YFinance provider (delayed)"
     if data is None or not isinstance(data, pd.DataFrame) or data.empty:
-        st.warning("No chart history is available for this symbol and timeframe. Run AlphaQuant to download it.")
+        st.warning("Intraday chart data is unavailable from the current provider. Try 1D or connect a broker market-data source." if timeframe != "1d" else "Daily chart data is currently unavailable for this symbol.")
         return
     data = data.tail(500).copy()
     overlays = st.multiselect("Overlays", ["EMA 20", "EMA 50", "VWAP", "Bollinger Bands", "Support / Resistance", "Trade Markers"],
@@ -10511,82 +10529,41 @@ def _paper_ledger_metrics() -> dict[str, float]:
 
 
 def render_terminal_dashboard():
-    prefs = WORKSPACE.preferences
-    configured_source = prefs.get("universe_source", "")
-    configured = bool(configured_source) and not (configured_source == "Custom Universe" and not prefs.get("universe_filters", {}).get("custom_symbols"))
-    mode = st.radio("Execution mode", ["PAPER", "LIVE"], horizontal=True,
-        index=0 if prefs.get("execution_mode", "PAPER") == "PAPER" else 1, key="execution_mode",
-        help="Paper uses simulated capital; Live requires an authenticated and healthy broker session.")
-    broker_state = get_broker_state().snapshot()
-    live_ready = bool(broker_state.get("connected") and broker_state.get("authenticated") and broker_state.get("execution_connected"))
-    estimated = {"Entire NSE":2200,"NIFTY 50":50,"NIFTY 100":100,"NIFTY 200":200,"NIFTY 500":500,"BANK NIFTY":12,"FINNIFTY":20}.get(configured_source, len(st.session_state.get("watchlist", [])))
-    st.markdown('<div class="aq-panel-title">Saved Run Configuration</div>', unsafe_allow_html=True)
-    if not configured:
-        st.error("Universe Status: NOT CONFIGURED — select the required fields and save the universe configuration.")
-    else:
-        st.info(f"Selected Universe: {configured_source}  •  Operating Mode: {prefs.get('operating_mode')}  •  Estimated Symbols: {estimated}  •  History: {prefs.get('history_period')}  •  Interval: {prefs.get('candle_interval')}")
-    if mode == "LIVE" and not live_ready:
-        st.error("LIVE MODE BLOCKED · Connect and test an authenticated broker with execution permission.")
-    a,b,c,d=st.columns([2,1,1,1])
-    blocked = not configured or (mode == "LIVE" and not live_ready)
-    run=a.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked,key="dashboard_controls_run")
-    if b.button("STOP",use_container_width=True,key="dashboard_controls_stop"):
-        get_core_runtime().stop()
-        st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED")
-    if c.button("EMERGENCY EXIT",use_container_width=True,key="dashboard_controls_emergency_exit"):
-        st.session_state.update(emergency_exit_requested=True,autonomous_active=False,pipeline_state="BLOCKED")
-        st.error("Emergency exit requested; execution is halted pending confirmation.")
-    if d.button("REFRESH MARKET DATA",use_container_width=True,key="dashboard_controls_refresh_market_data"):
-        MarketDataManager().update_history(st.session_state.get("scan_universe",[]),prefs.get("candle_interval","1d"))
-        st.rerun()
-    if run:
-        run_id, started = get_core_runtime().start({"mode": mode, "universe": configured_source,
-            "interval": prefs.get("candle_interval"), "period": prefs.get("history_period")})
-        WORKSPACE.save(execution_mode=mode)
-        st.session_state.update(alphaquant_run_pending=started,pipeline_state="STARTING",core_run_id=run_id)
-        if not started:
-            st.info(f"AlphaQuant core is already active ({run_id[:8]}). Duplicate start was ignored.")
-        st.rerun()
-    pipeline = st.session_state.get("pipeline_state", "STOPPED")
-    ledger = _paper_ledger_metrics()
-    cache_ready = MarketDataManager.storage_dir.exists() and any(MarketDataManager.storage_dir.glob("*.csv"))
-    capital_state = f"₹{ledger['cash']:,.2f} available" if mode == "PAPER" else ("SYNCED" if live_ready else "UNAVAILABLE")
-    readiness = [
-      ("Profile","READY"),("Universe",f"{configured_source} / {estimated} symbols" if configured else "NOT CONFIGURED"),
-      ("Historical Database","READY" if cache_ready else "NOT SYNCED"),("Paper Capital" if mode=="PAPER" else "Broker Funds",capital_state),
-      ("Broker Authentication","NOT REQUIRED" if mode=="PAPER" else ("AUTHENTICATED" if broker_state.get("authenticated") else "NOT CONNECTED")),
-      ("Market Data",broker_state.get("data_source","UNAVAILABLE")),
-      ("Execution Mode",mode),("Risk Settings","READY" if prefs.get("risk_preferences") else "NOT CONFIGURED"),
-      ("Pipeline","BLOCKED" if blocked else pipeline),("Last Sync",str(broker_state.get("last_sync_time") or st.session_state.get("terminal_quote_time") or "Never"))]
-    st.markdown('<div class="aq-panel-title">System Readiness</div>', unsafe_allow_html=True)
-    st.dataframe(pd.DataFrame(readiness,columns=["Component","State"]),use_container_width=True,hide_index=True)
-    st.markdown('<div class="aq-panel-title">Live Ticker</div>', unsafe_allow_html=True)
-    render_ticker_strip()
-    phases=st.session_state.get("pipeline_phases",{})
-    if phases:
-        latency=[]
-        for name,value in phases.items():
-            getv=(lambda key,default=None: value.get(key,default)) if isinstance(value,dict) else (lambda key,default=None: getattr(value,key,default))
-            latency.append({"Stage":name,"Duration (s)":getv("duration",getv("duration_seconds",0)),"Input":getv("input_count","—"),"Output":getv("output_count","—"),"Cache hits":getv("cache_hits",0),"Cache misses":getv("cache_misses",0),"Errors":getv("errors",[])})
-        if latency:
-            st.markdown('<div class="aq-panel-title">Stage Latency</div>',unsafe_allow_html=True)
-            st.dataframe(pd.DataFrame(latency),use_container_width=True,hide_index=True)
-    p1,p2=st.columns([1,2])
-    with p1:
-        st.markdown('<div class="aq-panel-title">Market Overview</div>',unsafe_allow_html=True)
-        st.metric("Market breadth",st.session_state.get("market_regime","NEUTRAL"))
-        render_watchlist(False)
-    with p2:
-        st.markdown('<div class="aq-panel-title">Portfolio Summary</div>',unsafe_allow_html=True)
-        paper_portfolio_summary()
-        render_opportunities()
-    q1,q2=st.columns(2)
-    with q1:
-        st.markdown('<div class="aq-panel-title">Open Positions</div>',unsafe_allow_html=True)
-        st.dataframe(position_frame(),use_container_width=True,hide_index=True)
-    with q2:
-        st.markdown('<div class="aq-panel-title">Holdings</div>',unsafe_allow_html=True)
-        st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
+    """Business-level command centre; technical inspection lives in Settings."""
+    prefs=WORKSPACE.preferences; mode=prefs.get("execution_mode","PAPER")
+    configured=bool(prefs.get("universe_source")); broker=get_broker_state().snapshot()
+    broker_ready=bool(broker.get("authenticated") and broker.get("connected"))
+    running=bool(st.session_state.get("autonomous_active"))
+    delayed=broker.get("data_source")=="YFINANCE_INTRADAY_FALLBACK"
+    opened=market_status()=="OPEN"; ledger=_paper_ledger_metrics()
+    paper_state=("RUNNING" if running and opened else "MARKET CLOSED" if running and not opened else
+        "READY WITH BROKER DATA" if broker_ready else "READY WITH DELAYED DATA" if configured else "NOT READY")
+    st.markdown('<div class="aq-panel-title">System Status</div>',unsafe_allow_html=True)
+    labels=[("Paper Trading",paper_state),("Broker","Connected" if broker_ready else "Not Connected"),
+        ("Market Data","Delayed" if delayed else "Live" if broker.get("market_data_connected") else "Unavailable"),
+        ("AlphaQuant","Running" if running else "Stopped")]
+    for col,(label,value) in zip(st.columns(4),labels): col.metric(label,value)
+    if mode=="PAPER" and not broker_ready and delayed:
+        st.caption("Broker not connected. Yahoo Finance intraday fallback is active. Execution will be simulated.")
+    if not opened:
+        st.info("Market closed. AlphaQuant is armed and will resume monitoring at market open." if running else "Market closed. You can review reports, candidates, holdings, daily charts, and configure the next run.")
+    blocked=not configured or (mode=="LIVE" and not broker_ready)
+    if mode=="LIVE" and not broker_ready: st.error("Live execution is disabled until broker authentication and quote API tests both succeed.")
+    if running:
+        if st.button("STOP ALPHAQUANT",type="primary",use_container_width=True,key="product_stop"):
+            get_core_runtime().stop(); st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); st.rerun()
+    elif st.button("RUN ALPHAQUANT",type="primary",use_container_width=True,disabled=blocked,key="product_run"):
+        run_id,started=get_core_runtime().start({"mode":mode,"universe":prefs.get("universe_source"),"interval":prefs.get("candle_interval"),"period":prefs.get("history_period")})
+        st.session_state.update(alphaquant_run_pending=started,pipeline_state="STARTING",core_run_id=run_id); st.rerun()
+    final=st.session_state.get("final_trade_list",[]); normal=_normal_opportunity_frame(filtered_opportunities({}))
+    actionable=int((normal["Status"]=="READY").sum()) if not normal.empty else 0
+    waiting=int((normal["Status"]=="WAITING FOR ENTRY").sum()) if not normal.empty else 0
+    pnl=ledger["realized"]+ledger["unrealized"]
+    metrics=[("Today's Candidates",len(st.session_state.get("trade_candidates",{})) or len(final)),("Actionable Trades",actionable),
+        ("Waiting for Entry",waiting),("Open Positions",len(st.session_state.get("paper_positions",{}))),
+        ("Today's P&L",_money(pnl)),("Available Capital",_money(ledger["cash"]) if mode=="PAPER" else "Broker managed")]
+    for col,(label,value) in zip(st.columns(6),metrics): col.metric(label,value)
+    render_opportunities()
 
 # =====================================================
 # AUTONOMOUS TRADING LOOP
@@ -11945,7 +11922,7 @@ def _safe_connection_test(profile):
         result["message"] = "Authentication and quote API succeeded." if result["success"] else "Quote API returned no market data."
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: broker authentication or quote API failed."
-        result["message"] = "Connection test failed; saved credentials do not imply a connection."
+        result["message"] = "Authentication failed. The saved access token may be expired or invalid."
     result["latency_ms"] = round((time.perf_counter()-started)*1000, 1)
     return result
 
@@ -11964,7 +11941,7 @@ def _apply_connection_result(profile, result):
         connected=result["success"], market_data_connected=False, execution_connected=bool(result["success"] and mode == "LIVE" and profile.get("execution_enabled")),
         execution_mode=mode, data_source="BROKER_SNAPSHOT" if result["quote_api"] else "YFINANCE_INTRADAY_FALLBACK",
         last_sync_time=datetime.now(timezone.utc), latency_ms=result["latency_ms"], connection_error=result["error"],
-        health_status=("READY_FOR_PAPER" if mode == "PAPER" else "READY_FOR_LIVE") if result["success"] else "ERROR",
+        health_status=("READY_FOR_PAPER" if mode == "PAPER" else "READY_FOR_LIVE") if result["success"] else ("DEGRADED" if mode == "PAPER" else "ERROR"),
         substatuses=statuses, onboarding_state="BROKER_CONNECTED" if result["success"] else "DEGRADED")
     if result["quote_api"]: get_broker_quote_worker().start(profile)
     return state.snapshot()
@@ -11972,19 +11949,20 @@ def _apply_connection_result(profile, result):
 
 def _render_connection_result(result):
     (st.success if result["success"] else st.error)(result["message"])
-    st.dataframe(pd.DataFrame([
-        ("Authentication", "SUCCESS" if result["authenticated"] else "FAILED"),
-        ("Quote API", "SUCCESS" if result["quote_api"] else "FAILED"),
-        ("WebSocket", "CONNECTED" if result["websocket"] else "NOT CONNECTED"),
-        ("Funds API", "NOT REQUIRED" if result["funds_api"] is None else ("SUCCESS" if result["funds_api"] else "FAILED")),
-        ("Latency", f"{result['latency_ms']} ms" if result["latency_ms"] is not None else "N/A"),
-        ("Error", result["error"] or "None"),
-    ], columns=["Check", "Result"]), use_container_width=True, hide_index=True)
+    with st.expander("Advanced Connection Diagnostics",expanded=False):
+        st.dataframe(pd.DataFrame([
+            ("Authentication", "SUCCESS" if result["authenticated"] else "FAILED"),
+            ("Quote API", "SUCCESS" if result["quote_api"] else "FAILED"),
+            ("WebSocket", "CONNECTED" if result["websocket"] else "NOT CONNECTED"),
+            ("Funds API", "NOT REQUIRED" if result["funds_api"] is None else ("SUCCESS" if result["funds_api"] else "FAILED")),
+            ("Latency", f"{result['latency_ms']} ms" if result["latency_ms"] is not None else "N/A"),
+        ],columns=["Check","Result"]),use_container_width=True,hide_index=True)
+        if WORKSPACE.preferences.get("developer_mode") and result.get("error"): st.code(result["error"])
 
 
 def render_setup_connect():
-    st.header("STEP 1 — SETUP & CONNECT")
-    st.caption("STEP 1 SETUP & CONNECT  →  STEP 2 VERIFY DATA  →  STEP 3 CONFIGURE  →  STEP 4 RUN ALPHAQUANT  →  STEP 5 MONITOR")
+    st.header("SETUP")
+    st.caption("STEP 1 OF 4  ·  EXECUTION  →  DATA  →  CONFIGURATION  →  READY")
     prefs = WORKSPACE.preferences; bcm = BrokerConfigManager()
     profiles = st.session_state.setdefault("broker_profiles", bcm.load()); names = list(profiles)
     a,b,c = st.columns(3)
@@ -11995,6 +11973,12 @@ def render_setup_connect():
     current.update(broker_name=broker, mode=mode.title())
     capital = st.number_input("Paper capital (₹)", min_value=1.0, value=float(prefs["paper_trading_capital"]), step=10000.0, disabled=mode != "PAPER")
     state = get_broker_state().snapshot()
+    authentication="SUCCESS" if state.get("authenticated") else "FAILED" if state.get("connection_error") else "OPTIONAL / NOT CONNECTED" if mode=="PAPER" else "NOT CONNECTED"
+    market_data="BROKER DATA" if state.get("market_data_connected") else "DELAYED FALLBACK" if mode=="PAPER" else "UNAVAILABLE"
+    action="None" if state.get("authenticated") else "Refresh or replace access token" if state.get("connection_error") else "Test connection"
+    st.markdown('<div class="aq-panel-title">Broker Connection</div>',unsafe_allow_html=True)
+    status_items=[("Broker",broker.upper()),("Authentication",authentication),("Market Data",market_data),("Paper Execution","READY" if mode=="PAPER" else "DISABLED"),("Live Execution","READY" if mode=="LIVE" and state.get("execution_connected") else "DISABLED"),("Last Test",str(state.get("last_sync_time") or "Never")),("Action Required",action)]
+    st.markdown('<div class="aq-status-card">'+''.join(f'<b>{k}</b><span>{v}</span>' for k,v in status_items)+'</div>',unsafe_allow_html=True)
     credential_status = "SAVED (masked)" if any(current.get(k) for k in ("api_key","access_token")) else "NOT SAVED"
     st.info(f"Credential status: {credential_status} · Historical provider: {prefs.get('historical_provider')} · Live data: {'AVAILABLE' if state['market_data_connected'] else 'NOT VERIFIED'}")
     with st.expander("Advanced Broker Credentials", expanded=False):
@@ -12010,24 +11994,26 @@ def render_setup_connect():
                 if value: current[key] = value
             bcm.save(current); os.chmod(bcm.storage_path, 0o600)
             st.success("Credentials saved and masked. Test Connection is still required."); st.rerun()
-    x,y,z = st.columns(3)
-    if x.button("Test Connection", type="primary", key="setup_test"):
+    x,y,z,w = st.columns(4)
+    if x.button("TEST CONNECTION", type="primary", key="setup_test"):
         result = _safe_connection_test(current); st.session_state["broker_test_result"] = result
         _apply_connection_result(current, result)
-    if y.button("Connect", key="setup_connect"):
+    if y.button("CONNECT", key="setup_connect"):
         result = _safe_connection_test(current); st.session_state["broker_test_result"] = result
         _apply_connection_result(current, result)
-    if z.button("Disconnect", key="setup_disconnect"):
+    if z.button("DISCONNECT", key="setup_disconnect"):
         get_broker_quote_worker().stop(); get_broker_state().update(authenticated=False, connected=False,
             market_data_connected=False, execution_connected=False, data_source="YFINANCE_INTRADAY_FALLBACK",
             health_status="DISCONNECTED", onboarding_state="BROKER_OPTIONAL" if mode == "PAPER" else "NOT_CONFIGURED")
+    if w.button("REPLACE CREDENTIALS", key="setup_replace_button"):
+        st.info("Open Advanced Broker Credentials, enable Replace Credentials, then save the replacement values.")
     if st.session_state.get("broker_test_result"): _render_connection_result(st.session_state["broker_test_result"])
     state = get_broker_state().snapshot()
     configured = bool(prefs.get("universe_source")); data_ready = state["market_data_connected"] or mode == "PAPER"
     checklist = [("Execution mode selected",True), ("Paper capital configured",mode != "PAPER" or capital > 0),
-        ("Broker authentication",state["authenticated"] if mode == "LIVE" else True),
+        ("Broker authentication",state["authenticated"] if mode == "LIVE" else None),
         ("Market-data path",data_ready), ("Universe and risk configuration",configured and bool(prefs.get("risk_preferences")))]
-    st.dataframe(pd.DataFrame([(name,"READY" if ok else "REQUIRED") for name,ok in checklist], columns=["Requirement","Status"]), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame([(name,"OPTIONAL / NOT CONNECTED" if ok is None else "READY" if ok else "REQUIRED") for name,ok in checklist], columns=["Requirement","Status"]), use_container_width=True, hide_index=True)
     with st.expander("STEP 3 — CONFIGURE", expanded=not configured):
         render_pre_run_universe_filters()
         f1,f2,f3,f4=st.columns(4)
@@ -12039,46 +12025,135 @@ def render_setup_connect():
             WORKSPACE.save(fast_track_execution=fast_track,minimum_fast_ai_score=fast_score,
                 require_deep_ai_before_entry=deep,signal_expiry_minutes=expiry)
             st.success("Fast AI, deep review and signal-expiry settings saved.")
-    if st.button("Continue to Configuration", type="primary", disabled=not all(ok for _,ok in checklist[:4]), key="setup_continue"):
+    if st.button("Continue to Configuration", type="primary", disabled=not all(ok is not False for _,ok in checklist[:4]), key="setup_continue"):
         WORKSPACE.save(execution_mode=mode, paper_trading_capital=capital, setup_complete=True)
         st.rerun()
     if configured and st.button("Continue to Dashboard", key="setup_dashboard"):
         st.session_state["_page"] = "Dashboard"; st.rerun()
 
 
+def _empty_state(message):
+    st.markdown(f'<div class="aq-empty">{message}</div>',unsafe_allow_html=True)
+
+
+def render_market_page():
+    st.header("MARKET")
+    overview,watch,search,chart,opportunities=st.tabs(["MARKET OVERVIEW","WATCHLISTS","SYMBOL SEARCH","LIVE CHARTS","OPPORTUNITIES"])
+    with overview:
+        st.caption("Index values and market-data status are shown in the ticker above.")
+        quotes=refresh_terminal_quotes(False)
+        frame=pd.DataFrame([{"Index":name,"Value":q.get("ltp",q.get("value")),"Change":q.get("change"),"Change %":q.get("change_percent",q.get("pct"))} for name,q in quotes.items()])
+        if frame.empty: _empty_state("Market overview is currently unavailable.")
+        else: st.dataframe(frame,use_container_width=True,hide_index=True)
+    with watch: render_watchlist(True)
+    with search:
+        symbol=st.text_input("Symbol search",value=st.session_state.get("selected_symbol","") or "",placeholder="RELIANCE",key="market_symbol_search").strip().upper().replace(".NS","")
+        if symbol and st.button("OPEN SYMBOL",type="primary",key="market_open_symbol"):
+            st.session_state.selected_symbol=symbol; st.rerun()
+        st.caption("Symbol details open contextually in Live Charts; they are not a separate workspace.")
+    with chart:
+        selected=st.session_state.get("selected_symbol") or next(iter(st.session_state.get("watchlist",[])),"")
+        if selected:
+            with st.spinner(f"Loading {selected} history…"): render_symbol_details(selected)
+        else: _empty_state("Search for a symbol or add one to a watchlist to view a chart.")
+    with opportunities: render_opportunities()
+
+
+def _orders_frame():
+    orders=st.session_state.get("paper_broker",{}).get("orders",{}) or {}
+    if isinstance(orders,dict): orders=orders.values()
+    rows=[]
+    for order in orders:
+        get=lambda k,d=None: order.get(k,d) if isinstance(order,dict) else getattr(order,k,d)
+        raw=str(get("status","")).upper(); status={"NOT_SUBMITTED":"No order submitted","COMPLETE":"Executed","FILLED":"Executed","REJECTED":"Rejected","PENDING":"Pending"}.get(raw,raw.replace("_"," ").title())
+        rows.append({"Time":get("time",get("timestamp")),"Symbol":get("symbol",""),"Side":get("side",""),"Quantity":get("quantity",get("qty",0)),"Order Type":get("order_type",get("type","")),"Price":get("price"),"Status":status,"Reason":get("reason","")})
+    return pd.DataFrame(rows,columns=["Time","Symbol","Side","Quantity","Order Type","Price","Status","Reason"])
+
+
+def _closed_trades_frame():
+    rows=[]
+    for trade in st.session_state.get("paper_history",[]):
+        get=lambda k,d=None: trade.get(k,d) if isinstance(trade,dict) else getattr(trade,k,d)
+        rows.append({"Date":get("exit_time",get("date")),"Symbol":get("symbol",""),"Side":get("side",""),"Entry":get("entry"),"Exit":get("exit_price",get("exit")),"Quantity":get("quantity",get("qty",0)),"P&L":get("realized_pnl",get("pnl",0)),"Exit Reason":get("exit_reason","")})
+    return pd.DataFrame(rows,columns=["Date","Symbol","Side","Entry","Exit","Quantity","P&L","Exit Reason"])
+
+
+def render_portfolio_page():
+    st.header("PORTFOLIO")
+    tabs=st.tabs(["OPEN POSITIONS","HOLDINGS","ORDERS","CLOSED TRADES"])
+    pos=position_frame().rename(columns={"CMP":"Current Price","Live P&L":"P&L","Stop":"Stop Loss","Current Recommendation":"Position Health","Exit Action":"Action"})
+    pos_cols=["Symbol","Side","Quantity","Entry","Current Price","P&L","Stop Loss","Target","Position Health","Action"]
+    if "Side" not in pos: pos["Side"]="BUY"
+    hold=holdings_frame().rename(columns={"Average Cost":"Average Price","CMP":"Current Price","Current Value":"Market Value"})
+    hold_cols=["Symbol","Quantity","Average Price","Current Price","Market Value","Unrealized P&L","Day Change"]
+    if "Day Change" not in hold: hold["Day Change"]=None
+    frames=[pos.reindex(columns=pos_cols),hold.reindex(columns=hold_cols),_orders_frame(),_closed_trades_frame()]
+    empty=["No open positions.","No holdings.","No orders today.","No closed trades."]
+    for tab,frame,message in zip(tabs,frames,empty):
+        with tab:
+            if frame.empty: _empty_state(message)
+            else: st.dataframe(frame,use_container_width=True,hide_index=True)
+
+
+def render_settings_page():
+    prefs=WORKSPACE.preferences; risk=dict(prefs.get("risk_preferences",{})); notifications=dict(prefs.get("notifications",{})); display=dict(prefs.get("display_preferences",{}))
+    st.header("SETTINGS")
+    account,trading,risk_tab,notice,display_tab,advanced=st.tabs(["ACCOUNT","TRADING DEFAULTS","RISK DEFAULTS","NOTIFICATIONS","DISPLAY","ADVANCED"])
+    with account:
+        name=st.text_input("Display name",prefs.get("display_name","Trader")); zone=st.selectbox("Time zone",["Asia/Kolkata","UTC"],index=0 if prefs.get("time_zone","Asia/Kolkata")=="Asia/Kolkata" else 1)
+    with trading:
+        execution=st.radio("Default execution mode",["PAPER","LIVE"],index=0 if prefs.get("execution_mode","PAPER")=="PAPER" else 1,horizontal=True)
+        universe=st.selectbox("Default universe",UNIVERSE_SOURCE_OPTIONS,index=UNIVERSE_SOURCE_OPTIONS.index(prefs.get("universe_source")) if prefs.get("universe_source") in UNIVERSE_SOURCE_OPTIONS else 0)
+        strategies=st.multiselect("Preferred strategies",sorted(SCAN_STYLE_STRATEGY_MAP),default=prefs.get("preferred_strategies",[])); capital=st.number_input("Default paper capital",min_value=1.0,value=float(prefs.get("paper_trading_capital",1000000)))
+    with risk_tab:
+        r1,r2=st.columns(2); risk_per=r1.number_input("Risk per trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1))); max_pos=r2.number_input("Maximum positions",1,100,int(prefs.get("maximum_positions",10))); daily=r1.number_input("Daily loss limit (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3))); sector=r2.number_input("Sector exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25)))
+    with notice:
+        toggles={label:st.toggle(label,value=notifications.get(key,True),key=f"notify_{key}") for key,label in [("trade_found","Trade found"),("order_executed","Order executed"),("stop_hit","Stop hit"),("target_hit","Target hit"),("daily_summary","Daily summary")]}
+    with display_tab:
+        compact=st.toggle("Compact mode",value=display.get("compact",True)); density=st.selectbox("Table density",["Compact","Comfortable"],index=0 if display.get("density","Compact")=="Compact" else 1); chart_default=st.selectbox("Chart default",["1m","5m","15m","30m","1h","1d"],index=["1m","5m","15m","30m","1h","1d"].index(prefs.get("chart_timeframe","1d")))
+    with advanced:
+        developer=st.toggle("Developer Mode",value=bool(prefs.get("developer_mode",False)),help="Disabled by default. Reveals implementation diagnostics.")
+        st.download_button("Export configuration",json.dumps(prefs,default=str,indent=2),"alphaquant_configuration.json","application/json")
+        st.caption("Reset workspace is available with confirmation on the paper-account management screen.")
+        if developer:
+            st.markdown("### Developer Mode")
+            devtabs=st.tabs(["RUNTIME","PIPELINE","BROKER DIAGNOSTICS","MARKET-DATA DIAGNOSTICS","PERFORMANCE","STATE INSPECTION","DECISION ARCHIVE","ERRORS & LOGS","SELF-TESTS"])
+            snapshot=get_core_runtime().snapshot(); broker=get_broker_state().snapshot(); phases=st.session_state.get("pipeline_phases",{})
+            with devtabs[0]: st.json(snapshot)
+            with devtabs[1]: st.json(phases)
+            with devtabs[2]: st.json({k:v for k,v in broker.items() if k!="quotes"})
+            with devtabs[3]: st.json({"source":broker.get("data_source"),"last_quote_time":broker.get("last_quote_time"),"quote_count":len(broker.get("quotes",{}))})
+            with devtabs[4]: st.dataframe(pd.DataFrame([{"Stage Latency":k,**(v if isinstance(v,dict) else {})} for k,v in phases.items()]),use_container_width=True,hide_index=True)
+            with devtabs[5]: st.json({"Runtime heartbeat":snapshot.get("heartbeat"),"Thread count":threading.active_count(),"Worker count":int(get_broker_quote_worker().thread is not None)})
+            with devtabs[6]: st.dataframe(pd.DataFrame(st.session_state.get("candidate_archive",[])),use_container_width=True,hide_index=True)
+            with devtabs[7]: st.json(st.session_state.get("errors",[]))
+            with devtabs[8]: show_startup_health_check()
+            raw=[_trade_row(t) for t in st.session_state.get("final_trade_list",[])]
+            if raw: st.dataframe(pd.DataFrame(raw)[["Symbol","AI Score","AI Threshold"]].rename(columns={"AI Score":"Raw score"}),use_container_width=True,hide_index=True)
+    if st.button("SAVE SETTINGS",type="primary"):
+        newrisk={**risk,"risk_per_trade":risk_per,"maximum_daily_loss":daily,"maximum_sector_exposure":sector}
+        WORKSPACE.save(display_name=name,time_zone=zone,execution_mode=execution,universe_source=universe,preferred_strategies=strategies,paper_trading_capital=capital,maximum_positions=max_pos,risk_preferences=newrisk,notifications={k:toggles[label] for k,label in [("trade_found","Trade found"),("order_executed","Order executed"),("stop_hit","Stop hit"),("target_hit","Target hit"),("daily_summary","Daily summary")]},display_preferences={"compact":compact,"density":density},chart_timeframe=chart_default,developer_mode=developer)
+        st.success("Settings saved."); st.rerun()
+
 def render_broker_manager():
     """Compatibility route; canonical setup page owns all broker controls."""
     render_setup_connect()
 
 def dispatch_application():
-    """The only route dispatch; called after every class and helper declaration."""
+    """Route the six product workspaces and keep the ticker below navigation."""
+    render_ticker_strip()
     page=st.session_state.get("_page","Dashboard")
-    if page=="Setup & Connect": render_setup_connect()
+    if page=="Setup": render_setup_connect()
     elif page=="Dashboard": render_terminal_dashboard()
-    elif page=="Watchlist": render_watchlist(True)
-    elif page=="Positions": st.subheader("Open Positions"); st.dataframe(position_frame(),use_container_width=True,hide_index=True)
-    elif page=="Holdings": st.subheader("Holdings"); st.dataframe(holdings_frame(),use_container_width=True,hide_index=True)
-    elif page=="Charts": render_symbol_details(st.session_state.get("selected_symbol") or ((st.session_state.get("watchlist") or [""])[0]))
+    elif page=="Market": render_market_page()
+    elif page=="Portfolio": render_portfolio_page()
     elif page=="Reports":
-        st.subheader("Reports & Decision Audit")
-        frames={
-            "Trade Report":get_final_trade_dataframe(),
-            "P&L Report":pd.DataFrame([getattr(x,"__dict__",{}) for x in st.session_state.get("paper_history",[])]),
-            "Position Report":position_frame(), "Holdings Report":holdings_frame(),
-            "Decision Audit":pd.DataFrame(st.session_state.get("candidate_archive", [])),
-            "Strategy Analytics":pd.DataFrame([_trade_row(t) for t in st.session_state.get("final_trade_list", [])]),
-        }
-        required={"Trade Report":["Symbol","Strategy","Status"],"P&L Report":["symbol","realized_pnl","exit_reason"],
-            "Position Report":["Symbol","Quantity","Entry","CMP"],"Holdings Report":["Symbol","Quantity","Average Cost"],
-            "Decision Audit":["Observed At","Symbol","Stage","Status","Reason"],"Strategy Analytics":["Symbol","Strategy","Confidence","Risk"]}
-        for name,df in frames.items():
-            if df.empty:
-                df=pd.DataFrame(columns=required[name])
-            st.download_button(f"Download {name} · CSV",df.to_csv(index=False).encode("utf-8-sig"),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv;charset=utf-8",key=f"reports_download_{name.lower().replace(' ','_')}")
-    elif page=="Profile": render_profile()
-    elif page=="Broker": render_broker_manager()
-    elif page=="Symbol Details": render_symbol_details(st.session_state.get("selected_symbol"))
-    elif page=="Developer": show_startup_health_check(); show_alphaquant_os_panel()
+        st.header("REPORTS")
+        reports={"Trade Report":get_final_trade_dataframe(),"P&L Report":_closed_trades_frame(),"Position Report":position_frame(),"Holdings Report":holdings_frame()}
+        for name,frame in reports.items():
+            st.download_button(f"Download {name} · CSV",frame.to_csv(index=False).encode("utf-8-sig"),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv;charset=utf-8",key=f"report_{name}")
+        if not any(not frame.empty for frame in reports.values()): _empty_state("No report data is available yet.")
+    elif page=="Settings": render_settings_page()
 
 
 def main():
