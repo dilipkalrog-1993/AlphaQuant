@@ -35,6 +35,8 @@ import uuid
 import hashlib
 import json
 import math
+import random
+import tempfile
 import threading
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
@@ -9534,7 +9536,7 @@ def prefetch_news_earnings(symbols):
                             continue
 
                         try:
-                            pub_dt = dt.fromisoformat(pub.replace('Z', '+00:00'))
+                            pub_dt = datetime.fromisoformat(pub.replace('Z', '+00:00'))
                         except Exception:
                             continue
 
