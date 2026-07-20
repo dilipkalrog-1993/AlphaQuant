@@ -266,39 +266,25 @@ hr{margin:.35rem 0!important;border-color:var(--aq-line)!important} #MainMenu,fo
 
 st.markdown(f'<div class="aq-brand"><b>ALPHAQUANT TERMINAL</b><span>MARKETS · RESEARCH · EXECUTION · RISK · <b>{st.session_state.get("pipeline_state", "STOPPED")}</b></span></div>', unsafe_allow_html=True)
 
-# Product navigation deliberately contains no implementation or object-level pages.
-# Symbol details are rendered contextually inside Market and diagnostics are opened
-# from Settings only after the user explicitly enables Developer Mode.
-_BASE_PAGES = ["Setup", "Dashboard", "Market", "Portfolio", "Reports", "Settings"]
-_developer_enabled = bool(st.session_state.get("workspace_preferences", {}).get("developer_mode", False))
-_PAGE_LIST = _BASE_PAGES
-if st.session_state.get("_page") not in _PAGE_LIST:
-    # Route before constructing any expensive page.  A persisted universe is
-    # the minimum configuration for Paper; Live additionally validates the
-    # broker when RUN is pressed.  An already-running process always rejoins
-    # its dashboard after a Streamlit session reconnect.
-    _workspace_path = Path(_APP_DIR) / "data" / "workspace.json"
-    _workspace_ready = False
-    try:
-        _saved_preferences = json.loads(_workspace_path.read_text(encoding="utf-8")).get("preferences", {})
-        _workspace_ready = bool(_saved_preferences.get("universe_source"))
-    except (OSError, ValueError, TypeError):
-        pass
-    _runtime_active = get_core_runtime().snapshot().get("status") in {"RUNNING", "MONITORING", "RESTORED"}
-    st.session_state["_page"] = "Dashboard" if (_workspace_ready or _runtime_active) else "Setup"
-_nav_cols = st.columns([1] * len(_BASE_PAGES))
-for _i, _pname in enumerate(_PAGE_LIST):
-    with _nav_cols[_i]:
+# The normal product shell has exactly four stable destinations.  Profile and
+# developer controls are intentionally outside product navigation.
+_PRODUCT_PAGES = ["Market", "Configuration", "Trading", "Reports"]
+if st.session_state.get("_page") not in _PRODUCT_PAGES:
+    st.session_state["_page"] = "Market"
+_nav_cols = st.columns([1, 1, 1, 1, .42])
+for _column, _pname in zip(_nav_cols[:4], _PRODUCT_PAGES):
+    with _column:
         if st.button(_pname.upper(), key=f"_nav_btn_{_pname}", use_container_width=True,
                      type="primary" if st.session_state["_page"] == _pname else "secondary"):
             st.session_state["_page"] = _pname
             st.rerun()
+with _nav_cols[4]:
+    if st.button("USER", key="_profile_control", use_container_width=True, help="Open user profile"):
+        st.session_state["_profile_open"] = True
+        st.rerun()
 
 def _P(*pages) -> bool:
-    # Legacy developer workspaces remain in the file for diagnostics but are
-    # never directly routable. Settings owns their explicit, gated surface.
-    aliases = {"Setup & Connect":"Setup", "Profile":"Settings", "Developer Mode":"__LEGACY_DEVELOPER_ROUTE__"}
-    return st.session_state.get("_page", "Dashboard") in {aliases.get(p,p) for p in pages}
+    return st.session_state.get("_page", "Market") in pages
 
 # =====================================================
 # APPLICATION CONFIGURATION
@@ -11947,89 +11933,181 @@ def _apply_connection_result(profile, result):
     return state.snapshot()
 
 
-def _render_connection_result(result):
-    (st.success if result["success"] else st.error)(result["message"])
-    with st.expander("Advanced Connection Diagnostics",expanded=False):
-        st.dataframe(pd.DataFrame([
-            ("Authentication", "SUCCESS" if result["authenticated"] else "FAILED"),
-            ("Quote API", "SUCCESS" if result["quote_api"] else "FAILED"),
-            ("WebSocket", "CONNECTED" if result["websocket"] else "NOT CONNECTED"),
-            ("Funds API", "NOT REQUIRED" if result["funds_api"] is None else ("SUCCESS" if result["funds_api"] else "FAILED")),
-            ("Latency", f"{result['latency_ms']} ms" if result["latency_ms"] is not None else "N/A"),
-        ],columns=["Check","Result"]),use_container_width=True,hide_index=True)
-        if WORKSPACE.preferences.get("developer_mode") and result.get("error"): st.code(result["error"])
+def _friendly_connection_failure(exc=None, status_code=None):
+    """Translate transport failures into a corrective, credential-safe message."""
+    if status_code in {401, 403}:
+        return "Access token is invalid or expired.", "Enter a current access token and reconnect."
+    if status_code == 429:
+        return "Broker service is temporarily unavailable.", "Wait a few minutes, then reconnect."
+    if status_code and status_code >= 500:
+        return "Broker service is temporarily unavailable.", "Try again later."
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return "Network connection failed.", "Check internet access and reconnect."
+    return "Authentication or quote permission could not be verified.", "Check the API key, secret, token, and quote API permission."
 
 
-def render_setup_connect():
-    st.header("SETUP")
-    st.caption("STEP 1 OF 4  ·  EXECUTION  →  DATA  →  CONFIGURATION  →  READY")
-    prefs = WORKSPACE.preferences; bcm = BrokerConfigManager()
-    profiles = st.session_state.setdefault("broker_profiles", bcm.load()); names = list(profiles)
-    a,b,c = st.columns(3)
-    mode = a.radio("Execution mode", ["PAPER","LIVE"], index=0 if prefs.get("execution_mode") == "PAPER" else 1, horizontal=True, key="setup_mode")
-    broker = b.selectbox("Broker selection", ["Upstox","Zerodha","No broker (delayed fallback)"], key="setup_broker")
-    selected = c.selectbox("Broker profile", names or ["New Profile"], key="setup_profile")
-    current = dict(profiles.get(selected, {"name":"default", "broker_name":broker, "mode":mode.title(), "market_data_enabled":True, "execution_enabled":False}))
-    current.update(broker_name=broker, mode=mode.title())
-    capital = st.number_input("Paper capital (₹)", min_value=1.0, value=float(prefs["paper_trading_capital"]), step=10000.0, disabled=mode != "PAPER")
-    state = get_broker_state().snapshot()
-    authentication="SUCCESS" if state.get("authenticated") else "FAILED" if state.get("connection_error") else "OPTIONAL / NOT CONNECTED" if mode=="PAPER" else "NOT CONNECTED"
-    market_data="BROKER DATA" if state.get("market_data_connected") else "DELAYED FALLBACK" if mode=="PAPER" else "UNAVAILABLE"
-    action="None" if state.get("authenticated") else "Refresh or replace access token" if state.get("connection_error") else "Test connection"
-    st.markdown('<div class="aq-panel-title">Broker Connection</div>',unsafe_allow_html=True)
-    status_items=[("Broker",broker.upper()),("Authentication",authentication),("Market Data",market_data),("Paper Execution","READY" if mode=="PAPER" else "DISABLED"),("Live Execution","READY" if mode=="LIVE" and state.get("execution_connected") else "DISABLED"),("Last Test",str(state.get("last_sync_time") or "Never")),("Action Required",action)]
-    st.markdown('<div class="aq-status-card">'+''.join(f'<b>{k}</b><span>{v}</span>' for k,v in status_items)+'</div>',unsafe_allow_html=True)
-    credential_status = "SAVED (masked)" if any(current.get(k) for k in ("api_key","access_token")) else "NOT SAVED"
-    st.info(f"Credential status: {credential_status} · Historical provider: {prefs.get('historical_provider')} · Live data: {'AVAILABLE' if state['market_data_connected'] else 'NOT VERIFIED'}")
-    with st.expander("Advanced Broker Credentials", expanded=False):
-        st.warning("If a credential has previously appeared on screen, rotate it at the broker before continuing.")
-        st.caption("Saved values are never redisplayed. Leave a field blank to retain it; use Replace Credentials to change it.")
-        api_key = st.text_input("API key", value="", type="password", placeholder="Saved ••••••••" if current.get("api_key") else "Enter API key", key="setup_api_key")
-        api_secret = st.text_input("API secret", value="", type="password", placeholder="Saved ••••••••" if current.get("api_secret") else "Enter API secret", key="setup_api_secret")
-        access_token = st.text_input("Access token", value="", type="password", placeholder="Saved ••••••••" if current.get("access_token") else "Enter access token", key="setup_access_token")
-        refresh_token = st.text_input("Refresh token", value="", type="password", placeholder="Saved ••••••••" if current.get("refresh_token") else "Optional", key="setup_refresh_token")
-        replace = st.toggle("Replace Credentials", value=False, key="setup_replace_credentials")
-        if st.button("Save Credentials", disabled=not replace, key="setup_save_credentials"):
-            for key,value in {"api_key":api_key,"api_secret":api_secret,"access_token":access_token,"refresh_token":refresh_token}.items():
-                if value: current[key] = value
-            bcm.save(current); os.chmod(bcm.storage_path, 0o600)
-            st.success("Credentials saved and masked. Test Connection is still required."); st.rerun()
-    x,y,z,w = st.columns(4)
-    if x.button("TEST CONNECTION", type="primary", key="setup_test"):
-        result = _safe_connection_test(current); st.session_state["broker_test_result"] = result
-        _apply_connection_result(current, result)
-    if y.button("CONNECT", key="setup_connect"):
-        result = _safe_connection_test(current); st.session_state["broker_test_result"] = result
-        _apply_connection_result(current, result)
-    if z.button("DISCONNECT", key="setup_disconnect"):
-        get_broker_quote_worker().stop(); get_broker_state().update(authenticated=False, connected=False,
-            market_data_connected=False, execution_connected=False, data_source="YFINANCE_INTRADAY_FALLBACK",
-            health_status="DISCONNECTED", onboarding_state="BROKER_OPTIONAL" if mode == "PAPER" else "NOT_CONFIGURED")
-    if w.button("REPLACE CREDENTIALS", key="setup_replace_button"):
-        st.info("Open Advanced Broker Credentials, enable Replace Credentials, then save the replacement values.")
-    if st.session_state.get("broker_test_result"): _render_connection_result(st.session_state["broker_test_result"])
-    state = get_broker_state().snapshot()
-    configured = bool(prefs.get("universe_source")); data_ready = state["market_data_connected"] or mode == "PAPER"
-    checklist = [("Execution mode selected",True), ("Paper capital configured",mode != "PAPER" or capital > 0),
-        ("Broker authentication",state["authenticated"] if mode == "LIVE" else None),
-        ("Market-data path",data_ready), ("Universe and risk configuration",configured and bool(prefs.get("risk_preferences")))]
-    st.dataframe(pd.DataFrame([(name,"OPTIONAL / NOT CONNECTED" if ok is None else "READY" if ok else "REQUIRED") for name,ok in checklist], columns=["Requirement","Status"]), use_container_width=True, hide_index=True)
-    with st.expander("STEP 3 — CONFIGURE", expanded=not configured):
-        render_pre_run_universe_filters()
-        f1,f2,f3,f4=st.columns(4)
-        fast_track=f1.toggle("Fast-track execution",value=bool(prefs.get("fast_track_execution",mode=="PAPER")),key="setup_fast_track")
-        fast_score=f2.number_input("Minimum fast AI score",0.0,100.0,float(prefs.get("minimum_fast_ai_score",70)),key="setup_fast_score")
-        deep=f3.toggle("Require deep AI before entry",value=bool(prefs.get("require_deep_ai_before_entry",False)),key="setup_deep_ai")
-        expiry=f4.number_input("Signal expiry (minutes)",1,1440,int(prefs.get("signal_expiry_minutes",30)),key="setup_signal_expiry")
-        if st.button("Save AI and entry configuration",key="setup_save_ai"):
-            WORKSPACE.save(fast_track_execution=fast_track,minimum_fast_ai_score=fast_score,
-                require_deep_ai_before_entry=deep,signal_expiry_minutes=expiry)
-            st.success("Fast AI, deep review and signal-expiry settings saved.")
-    if st.button("Continue to Configuration", type="primary", disabled=not all(ok is not False for _,ok in checklist[:4]), key="setup_continue"):
-        WORKSPACE.save(execution_mode=mode, paper_trading_capital=capital, setup_complete=True)
-        st.rerun()
-    if configured and st.button("Continue to Dashboard", key="setup_dashboard"):
-        st.session_state["_page"] = "Dashboard"; st.rerun()
+def _safe_connection_test(profile):
+    """Validate profile, authentication/profile API, and quote API in one action."""
+    started=time.perf_counter()
+    result={"success":False,"authenticated":False,"profile_api":False,"quote_api":False,
+        "latency_ms":None,"message":"Connection was not tested.","reason":"","action":"","details":{}}
+    missing=[label for key,label in (("api_key","API key"),("api_secret","API secret"),("access_token","Access token")) if not str(profile.get(key) or "").strip()]
+    if missing:
+        result.update(reason=f"Missing required configuration: {', '.join(missing)}.",action="Complete every required credential field.")
+        return result
+    headers={"Authorization":f"Bearer {profile['access_token']}","Accept":"application/json"}
+    try:
+        profile_response=requests.get("https://api.upstox.com/v2/user/profile",headers=headers,timeout=15)
+        result["details"]["profile_status"]=profile_response.status_code
+        profile_response.raise_for_status()
+        result["profile_api"]=bool(profile_response.json().get("data"))
+        result["authenticated"]=result["profile_api"]
+        quote_response=requests.get("https://api.upstox.com/v2/market-quote/quotes",headers=headers,
+            params={"instrument_key":UPSTOX_INDEX_INSTRUMENTS["NIFTY 50"]},timeout=15)
+        result["details"]["quote_status"]=quote_response.status_code
+        quote_response.raise_for_status()
+        result["quote_api"]=bool(quote_response.json().get("data"))
+        if not result["quote_api"]:
+            result.update(reason="Quote API permission is unavailable.",action="Enable market-quote access for this broker application.")
+        result["success"]=result["authenticated"] and result["profile_api"] and result["quote_api"]
+    except requests.HTTPError as exc:
+        status=getattr(exc.response,"status_code",None); reason,action=_friendly_connection_failure(exc,status)
+        result.update(reason=reason,action=action); result["details"]["failure_status"]=status
+    except (requests.ConnectionError,requests.Timeout) as exc:
+        reason,action=_friendly_connection_failure(exc); result.update(reason=reason,action=action)
+    except (ValueError,TypeError):
+        result.update(reason="Broker returned an unreadable response.",action="Try again; contact broker support if this continues.")
+    result["latency_ms"]=round((time.perf_counter()-started)*1000,1)
+    result["message"]="Authentication successful. Market data available." if result["success"] else result["reason"]
+    return result
+
+
+def _token_reminder(profile):
+    raw=profile.get("token_expiry_date") or profile.get("token_expiry")
+    if not raw: return "", "NONE"
+    try: expiry=pd.Timestamp(raw).date(); days=(expiry-datetime.now(timezone.utc).date()).days
+    except (TypeError,ValueError): return "Token expiry date needs correction.", "ERROR"
+    broker=str(profile.get("broker_name","Broker")).title()
+    if days < 0: return f"{broker} token has expired. Reconnect now to restore service.","EXPIRED"
+    if days == 0: return f"{broker} token expires today. Reconnect now to avoid interruption.","EXPIRING"
+    if days == 1: return f"{broker} token expires tomorrow. Reconnect now to avoid interruption.","EXPIRING"
+    if days in {2,3}: return f"{broker} token expires in {days} days. Plan to reconnect.","EXPIRING"
+    if days <= 7: return f"{broker} token expires in {days} days. Plan to reconnect.","EXPIRING"
+    return "","NONE"
+
+
+def _apply_connection_result(profile,result):
+    mode=str(profile.get("mode","Paper")).upper(); now=datetime.now(timezone.utc).isoformat()
+    profile["last_successful_validation"]=now if result["success"] else profile.get("last_successful_validation")
+    profile["last_failed_validation"]=now if not result["success"] else profile.get("last_failed_validation")
+    reminder,reminder_state=_token_reminder(profile); profile["reminder_state"]=reminder_state
+    BrokerConfigManager().save(profile)
+    state=get_broker_state(); state.update(broker_name=profile.get("broker_name","Upstox"),profile_name=profile.get("name","default"),
+        configured=True,authenticated=result["authenticated"],connected=result["success"],market_data_connected=result["quote_api"],
+        execution_connected=bool(result["success"] and mode=="LIVE"),execution_mode=mode,
+        data_source="BROKER_SNAPSHOT" if result["quote_api"] else "YFINANCE_INTRADAY_FALLBACK",
+        last_sync_time=datetime.now(timezone.utc),latency_ms=result["latency_ms"],connection_error=None if result["success"] else result["reason"],
+        token_expiry=profile.get("token_expiry_date"),health_status=("READY_FOR_LIVE" if mode=="LIVE" else "READY_FOR_PAPER") if result["success"] else ("DEGRADED" if mode=="PAPER" else "ERROR"),
+        substatuses=[],onboarding_state="BROKER_CONNECTED" if result["success"] else "DEGRADED")
+    if result["success"]: get_broker_quote_worker().start(profile)
+    return state.snapshot()
+
+
+def _broker_product_state():
+    state=get_broker_state().snapshot(); profiles=st.session_state.get("broker_profiles",{}); profile=profiles.get(state.get("profile_name"),{})
+    reminder,kind=_token_reminder(profile)
+    if kind=="EXPIRED": return "TOKEN EXPIRED",reminder
+    if kind=="EXPIRING": return "TOKEN EXPIRING",reminder
+    if state.get("health_status")=="AUTHENTICATING": return "CONNECTING",reminder
+    if state.get("connection_error") and state.get("execution_mode")=="LIVE": return "ERROR",reminder
+    if state.get("authenticated") and state.get("data_source")=="BROKER_SNAPSHOT": return "CONNECTED — SNAPSHOT DATA",reminder
+    if state.get("authenticated"): return "CONNECTED",reminder
+    if state.get("data_source")=="YFINANCE_INTRADAY_FALLBACK": return "DELAYED FALLBACK",reminder
+    return "NOT CONNECTED",reminder
+
+
+def _render_connection_result(result,profile):
+    expiry=profile.get("token_expiry_date") or "not specified (user supplied)"
+    if result["success"]:
+        st.success(f"UPSTOX CONNECTED\n\nAuthentication successful\n\nMarket data available\n\nToken valid until {expiry}")
+    else:
+        st.error(f"UPSTOX CONNECTION FAILED\n\n{result['reason']}\n\n{result['action']}")
+
+
+def render_broker_connection():
+    prefs=WORKSPACE.preferences; bcm=BrokerConfigManager(); profiles=st.session_state.setdefault("broker_profiles",bcm.load())
+    profile=dict(profiles.get("default",{"name":"default","broker_name":"Upstox","mode":prefs.get("execution_mode","PAPER").title()}))
+    state_label,reminder=_broker_product_state(); st.markdown(f"**{state_label}**")
+    if reminder: st.warning(reminder)
+    saved=bool(profile.get("access_token")); editing=st.session_state.get("broker_editing",not saved)
+    if saved and not editing:
+        st.info("Credentials saved securely: API key •••••••• · API secret •••••••• · Access token ••••••••")
+        st.caption(f"Expected token expiry: {profile.get('token_expiry_date','Not provided')} · Last successful validation: {profile.get('last_successful_validation','Never')} · Last failed validation: {profile.get('last_failed_validation','Never')}")
+        a,b=st.columns(2)
+        if a.button("EDIT CONNECTION",use_container_width=True,key="broker_edit"):
+            st.session_state["broker_editing"]=True; st.rerun()
+        if b.button("DISCONNECT",use_container_width=True,key="broker_disconnect"):
+            get_broker_quote_worker().stop(); get_broker_state().update(authenticated=False,connected=False,market_data_connected=False,execution_connected=False,data_source="YFINANCE_INTRADAY_FALLBACK",health_status="DISCONNECTED",connection_error=None)
+            st.session_state.pop("broker_connection_result",None); st.rerun()
+    else:
+        st.caption("Enter replacement values. Saved secrets are never displayed or inserted into these fields.")
+        with st.form("broker_connection_form",clear_on_submit=True):
+            broker=st.selectbox("Broker",["Upstox"],key="broker_name")
+            api_key=st.text_input("API Key",type="password",value="",key="broker_api_key")
+            api_secret=st.text_input("API Secret",type="password",value="",key="broker_api_secret")
+            access_token=st.text_input("Access Token",type="password",value="",key="broker_access_token")
+            expiry=st.date_input("Token Expiry Date",value=None,key="broker_expiry",help="Expected expiry supplied by you; it is not described as broker-verified.")
+            confirm=st.checkbox("Confirm replacement of the saved connection",value=not saved,key="broker_confirm")
+            submitted=st.form_submit_button("SAVE AND CONNECT",type="primary",use_container_width=True)
+        if submitted:
+            if saved and not confirm: st.error("Confirm credential replacement to continue.")
+            else:
+                candidate={**profile,"name":"default","broker_name":broker,"mode":prefs.get("execution_mode","PAPER").title(),"api_key":api_key,"api_secret":api_secret,"access_token":access_token,"token_creation_date":datetime.now(timezone.utc).date().isoformat(),"token_expiry_date":expiry.isoformat() if expiry else None}
+                get_broker_state().update(health_status="AUTHENTICATING",onboarding_state="BROKER_CONNECTING")
+                with st.spinner("Validating configuration, profile access, and market quotes…"):
+                    result=_safe_connection_test(candidate)
+                _apply_connection_result(candidate,result); st.session_state["broker_connection_result"]=(result,candidate); st.session_state["broker_editing"]=not result["success"]
+    if st.session_state.get("broker_connection_result"):
+        result,candidate=st.session_state["broker_connection_result"]; _render_connection_result(result,candidate)
+
+
+def render_profile_contents():
+    prefs=WORKSPACE.preferences
+    account,broker,notifications,display,advanced=st.tabs(["ACCOUNT","BROKER CONNECTION","NOTIFICATIONS","DISPLAY","ADVANCED"])
+    with account:
+        with st.form("account_form"):
+            name=st.text_input("Display name",prefs.get("display_name","Trader")); zone=st.selectbox("Time zone",["Asia/Kolkata","UTC"],index=0 if prefs.get("time_zone","Asia/Kolkata")=="Asia/Kolkata" else 1)
+            if st.form_submit_button("SAVE ACCOUNT"): WORKSPACE.save(display_name=name,time_zone=zone); st.success("Account saved.")
+    with broker: render_broker_connection()
+    with notifications:
+        _,reminder=_broker_product_state()
+        if reminder: st.warning(reminder)
+        else: st.info("No broker token reminders.")
+        st.caption("Connection and trading notifications appear here.")
+    with display:
+        with st.form("display_form"):
+            compact=st.toggle("Compact mode",value=bool(prefs.get("display_preferences",{}).get("compact",True))); density=st.selectbox("Table density",["Compact","Comfortable"])
+            if st.form_submit_button("SAVE DISPLAY"): WORKSPACE.save(display_preferences={"compact":compact,"density":density}); st.success("Display preferences saved.")
+    with advanced:
+        developer=st.toggle("Developer Mode",value=bool(prefs.get("developer_mode",False)),help="Disabled by default.")
+        if developer != bool(prefs.get("developer_mode",False)): WORKSPACE.save(developer_mode=developer)
+        if developer:
+            devtabs=st.tabs(["BROKER","RUNTIME","STATE","LOGS","SELF-TESTS"])
+            with devtabs[0]: st.json({**get_broker_state().snapshot(),"quotes":"Hidden from summary"}); st.json((st.session_state.get("broker_connection_result") or ({},))[0].get("details",{}))
+            with devtabs[1]: st.json(get_core_runtime().snapshot())
+            with devtabs[2]: st.json({"threads":threading.active_count(),"pipeline":st.session_state.get("pipeline_state")})
+            with devtabs[3]: st.json(st.session_state.get("errors",[]))
+            with devtabs[4]: show_startup_health_check()
+
+
+if hasattr(st,"dialog"):
+    @st.dialog("USER PROFILE",width="large")
+    def render_profile_dialog():
+        render_profile_contents()
+        if st.button("CLOSE",use_container_width=True,key="profile_close"):
+            st.session_state["_profile_open"]=False; st.rerun()
+else:
+    def render_profile_dialog(): render_profile_contents()
 
 
 def _empty_state(message):
@@ -12037,124 +12115,97 @@ def _empty_state(message):
 
 
 def render_market_page():
+    state_label,reminder=_broker_product_state(); running=bool(st.session_state.get("autonomous_active")); candidates=filtered_opportunities(WORKSPACE.preferences.get("filters",{})); normal=_normal_opportunity_frame(candidates)
     st.header("MARKET")
-    overview,watch,search,chart,opportunities=st.tabs(["MARKET OVERVIEW","WATCHLISTS","SYMBOL SEARCH","LIVE CHARTS","OPPORTUNITIES"])
+    a,b,c,d,e=st.columns(5); a.metric("Market",market_status()); b.metric("Data / Broker",state_label); c.metric("AlphaQuant","RUNNING" if running else "STOPPED"); d.metric("Opportunities",int((normal.get("Status",pd.Series(dtype=str))=="READY").sum())); e.metric("Watching",int(normal.get("Status",pd.Series(dtype=str)).isin(["WATCHING","WAITING FOR ENTRY"]).sum()))
+    if reminder: st.warning(reminder)
+    if WORKSPACE.preferences.get("execution_mode","PAPER")=="PAPER" and state_label in {"NOT CONNECTED","DELAYED FALLBACK"}: st.info("PAPER TRADING READY WITH DELAYED DATA")
+    run,stop=st.columns(2)
+    if run.button("RUN ALPHAQUANT",type="primary",disabled=running,use_container_width=True,key="market_run"): st.session_state["alphaquant_run_pending"]=True; st.rerun()
+    if stop.button("STOP ALPHAQUANT",disabled=not running,use_container_width=True,key="market_stop"): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); get_core_runtime().stop(); st.rerun()
+    overview,watch,search,chart,opportunities=st.tabs(["OVERVIEW","WATCHLISTS","SYMBOL SEARCH","CHARTS","OPPORTUNITIES"])
     with overview:
-        st.caption("Index values and market-data status are shown in the ticker above.")
-        quotes=refresh_terminal_quotes(False)
-        frame=pd.DataFrame([{"Index":name,"Value":q.get("ltp",q.get("value")),"Change":q.get("change"),"Change %":q.get("change_percent",q.get("pct"))} for name,q in quotes.items()])
-        if frame.empty: _empty_state("Market overview is currently unavailable.")
-        else: st.dataframe(frame,use_container_width=True,hide_index=True)
+        regime=st.session_state.get("market_regime","Awaiting analysis"); universe=list(st.session_state.get("stock_objects",{}).values()); advances=sum(float(getattr(x,"change_pct",0) or 0)>0 for x in universe); declines=sum(float(getattr(x,"change_pct",0) or 0)<0 for x in universe)
+        x,y,z=st.columns(3); x.metric("Market regime",str(regime).replace("_"," ").title()); y.metric("Breadth",f"{advances} advancing / {declines} declining"); z.metric("Universe",len(universe))
+        sectors=calculate_sector_strength() or {}; st.markdown("#### Sector overview")
+        st.dataframe(pd.DataFrame([{"Sector":k,"Strength":v} for k,v in sectors.items()]),use_container_width=True,hide_index=True) if sectors else _empty_state("Sector overview will appear after analysis.")
     with watch: render_watchlist(True)
     with search:
-        symbol=st.text_input("Symbol search",value=st.session_state.get("selected_symbol","") or "",placeholder="RELIANCE",key="market_symbol_search").strip().upper().replace(".NS","")
-        if symbol and st.button("OPEN SYMBOL",type="primary",key="market_open_symbol"):
-            st.session_state.selected_symbol=symbol; st.rerun()
-        st.caption("Symbol details open contextually in Live Charts; they are not a separate workspace.")
+        symbol=st.text_input("Symbol search",placeholder="RELIANCE",key="market_symbol_search").strip().upper().replace(".NS","")
+        if symbol and st.button("VIEW CHART",type="primary",key="market_symbol_open"): st.session_state.selected_symbol=symbol; st.rerun()
     with chart:
-        selected=st.session_state.get("selected_symbol") or next(iter(st.session_state.get("watchlist",[])),"")
-        if selected:
-            with st.spinner(f"Loading {selected} history…"): render_symbol_details(selected)
-        else: _empty_state("Search for a symbol or add one to a watchlist to view a chart.")
+        symbol=st.session_state.get("selected_symbol") or next(iter(st.session_state.get("watchlist",[])),"")
+        render_symbol_details(symbol) if symbol else _empty_state("Search for a symbol or select a watchlist symbol.")
     with opportunities: render_opportunities()
 
 
-def _orders_frame():
-    orders=st.session_state.get("paper_broker",{}).get("orders",{}) or {}
-    if isinstance(orders,dict): orders=orders.values()
-    rows=[]
-    for order in orders:
-        get=lambda k,d=None: order.get(k,d) if isinstance(order,dict) else getattr(order,k,d)
-        raw=str(get("status","")).upper(); status={"NOT_SUBMITTED":"No order submitted","COMPLETE":"Executed","FILLED":"Executed","REJECTED":"Rejected","PENDING":"Pending"}.get(raw,raw.replace("_"," ").title())
-        rows.append({"Time":get("time",get("timestamp")),"Symbol":get("symbol",""),"Side":get("side",""),"Quantity":get("quantity",get("qty",0)),"Order Type":get("order_type",get("type","")),"Price":get("price"),"Status":status,"Reason":get("reason","")})
-    return pd.DataFrame(rows,columns=["Time","Symbol","Side","Quantity","Order Type","Price","Status","Reason"])
-
-
-def _closed_trades_frame():
-    rows=[]
-    for trade in st.session_state.get("paper_history",[]):
-        get=lambda k,d=None: trade.get(k,d) if isinstance(trade,dict) else getattr(trade,k,d)
-        rows.append({"Date":get("exit_time",get("date")),"Symbol":get("symbol",""),"Side":get("side",""),"Entry":get("entry"),"Exit":get("exit_price",get("exit")),"Quantity":get("quantity",get("qty",0)),"P&L":get("realized_pnl",get("pnl",0)),"Exit Reason":get("exit_reason","")})
-    return pd.DataFrame(rows,columns=["Date","Symbol","Side","Entry","Exit","Quantity","P&L","Exit Reason"])
-
-
-def render_portfolio_page():
-    st.header("PORTFOLIO")
-    tabs=st.tabs(["OPEN POSITIONS","HOLDINGS","ORDERS","CLOSED TRADES"])
-    pos=position_frame().rename(columns={"CMP":"Current Price","Live P&L":"P&L","Stop":"Stop Loss","Current Recommendation":"Position Health","Exit Action":"Action"})
-    pos_cols=["Symbol","Side","Quantity","Entry","Current Price","P&L","Stop Loss","Target","Position Health","Action"]
-    if "Side" not in pos: pos["Side"]="BUY"
-    hold=holdings_frame().rename(columns={"Average Cost":"Average Price","CMP":"Current Price","Current Value":"Market Value"})
-    hold_cols=["Symbol","Quantity","Average Price","Current Price","Market Value","Unrealized P&L","Day Change"]
-    if "Day Change" not in hold: hold["Day Change"]=None
-    frames=[pos.reindex(columns=pos_cols),hold.reindex(columns=hold_cols),_orders_frame(),_closed_trades_frame()]
-    empty=["No open positions.","No holdings.","No orders today.","No closed trades."]
-    for tab,frame,message in zip(tabs,frames,empty):
-        with tab:
-            if frame.empty: _empty_state(message)
-            else: st.dataframe(frame,use_container_width=True,hide_index=True)
-
-
-def render_settings_page():
-    prefs=WORKSPACE.preferences; risk=dict(prefs.get("risk_preferences",{})); notifications=dict(prefs.get("notifications",{})); display=dict(prefs.get("display_preferences",{}))
-    st.header("SETTINGS")
-    account,trading,risk_tab,notice,display_tab,advanced=st.tabs(["ACCOUNT","TRADING DEFAULTS","RISK DEFAULTS","NOTIFICATIONS","DISPLAY","ADVANCED"])
-    with account:
-        name=st.text_input("Display name",prefs.get("display_name","Trader")); zone=st.selectbox("Time zone",["Asia/Kolkata","UTC"],index=0 if prefs.get("time_zone","Asia/Kolkata")=="Asia/Kolkata" else 1)
-    with trading:
-        execution=st.radio("Default execution mode",["PAPER","LIVE"],index=0 if prefs.get("execution_mode","PAPER")=="PAPER" else 1,horizontal=True)
-        universe=st.selectbox("Default universe",UNIVERSE_SOURCE_OPTIONS,index=UNIVERSE_SOURCE_OPTIONS.index(prefs.get("universe_source")) if prefs.get("universe_source") in UNIVERSE_SOURCE_OPTIONS else 0)
-        strategies=st.multiselect("Preferred strategies",sorted(SCAN_STYLE_STRATEGY_MAP),default=prefs.get("preferred_strategies",[])); capital=st.number_input("Default paper capital",min_value=1.0,value=float(prefs.get("paper_trading_capital",1000000)))
+def render_configuration_page():
+    prefs=WORKSPACE.preferences; saved=dict(prefs.get("filters",{})); risk=dict(prefs.get("risk_preferences",{})); filters_tab,risk_tab=st.tabs(["FILTERS","RISK"])
+    with filters_tab:
+        with st.form("filters_configuration"):
+            a,b=st.columns(2)
+            universe=a.selectbox("Universe",UNIVERSE_SOURCE_OPTIONS,index=UNIVERSE_SOURCE_OPTIONS.index(prefs.get("universe_source")) if prefs.get("universe_source") in UNIVERSE_SOURCE_OPTIONS else 0)
+            indices=b.multiselect("Index selection",["NIFTY 50","NIFTY 100","NIFTY 200","NIFTY 500","BANK NIFTY","FINNIFTY"],default=saved.get("indices",[])); sectors=a.multiselect("Sector selection",sorted(set(STOCK_SECTOR_MAP.values())),default=saved.get("sectors",[])); watchlist=b.selectbox("Watchlist",list((prefs.get("watchlists") or {"Default":[]}).keys()))
+            maximum=a.number_input("Maximum stocks to scan",1,5000,int(saved.get("maximum_stocks",500))); price=b.slider("Price range",0,100000,tuple(saved.get("price_range",[20,10000]))); volume=a.number_input("Minimum volume",0,1000000000,int(saved.get("minimum_volume",100000)),step=10000); cap=b.multiselect("Market-cap category",["Large Cap","Mid Cap","Small Cap"],default=saved.get("market_cap",[])); fno=a.toggle("F&O only",value=bool(saved.get("fno_only",False)))
+            strategies=b.multiselect("Strategy selection",sorted(SCAN_STYLE_STRATEGY_MAP),default=saved.get("strategies",[])); confidence=a.slider("Minimum confidence",0,100,int(saved.get("minimum_confidence",70))); breakout=b.toggle("Breakout",value=saved.get("breakout",True)); pullback=a.toggle("Pullback",value=saved.get("pullback",True)); momentum=b.toggle("Momentum",value=saved.get("momentum",True)); high=a.toggle("High-confidence only",value=bool(saved.get("high_confidence_only",False)))
+            if st.form_submit_button("SAVE FILTERS",type="primary"):
+                WORKSPACE.save(universe_source=universe,filters={**saved,"indices":indices,"sectors":sectors,"watchlist":watchlist,"maximum_stocks":maximum,"price_range":list(price),"minimum_volume":volume,"market_cap":cap,"fno_only":fno,"strategies":strategies,"minimum_confidence":confidence,"breakout":breakout,"pullback":pullback,"momentum":momentum,"high_confidence_only":high}); st.success("Filters saved. The pipeline was not started or restarted.")
     with risk_tab:
-        r1,r2=st.columns(2); risk_per=r1.number_input("Risk per trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1))); max_pos=r2.number_input("Maximum positions",1,100,int(prefs.get("maximum_positions",10))); daily=r1.number_input("Daily loss limit (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3))); sector=r2.number_input("Sector exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25)))
-    with notice:
-        toggles={label:st.toggle(label,value=notifications.get(key,True),key=f"notify_{key}") for key,label in [("trade_found","Trade found"),("order_executed","Order executed"),("stop_hit","Stop hit"),("target_hit","Target hit"),("daily_summary","Daily summary")]}
-    with display_tab:
-        compact=st.toggle("Compact mode",value=display.get("compact",True)); density=st.selectbox("Table density",["Compact","Comfortable"],index=0 if display.get("density","Compact")=="Compact" else 1); chart_default=st.selectbox("Chart default",["1m","5m","15m","30m","1h","1d"],index=["1m","5m","15m","30m","1h","1d"].index(prefs.get("chart_timeframe","1d")))
-    with advanced:
-        developer=st.toggle("Developer Mode",value=bool(prefs.get("developer_mode",False)),help="Disabled by default. Reveals implementation diagnostics.")
-        st.download_button("Export configuration",json.dumps(prefs,default=str,indent=2),"alphaquant_configuration.json","application/json")
-        st.caption("Reset workspace is available with confirmation on the paper-account management screen.")
-        if developer:
-            st.markdown("### Developer Mode")
-            devtabs=st.tabs(["RUNTIME","PIPELINE","BROKER DIAGNOSTICS","MARKET-DATA DIAGNOSTICS","PERFORMANCE","STATE INSPECTION","DECISION ARCHIVE","ERRORS & LOGS","SELF-TESTS"])
-            snapshot=get_core_runtime().snapshot(); broker=get_broker_state().snapshot(); phases=st.session_state.get("pipeline_phases",{})
-            with devtabs[0]: st.json(snapshot)
-            with devtabs[1]: st.json(phases)
-            with devtabs[2]: st.json({k:v for k,v in broker.items() if k!="quotes"})
-            with devtabs[3]: st.json({"source":broker.get("data_source"),"last_quote_time":broker.get("last_quote_time"),"quote_count":len(broker.get("quotes",{}))})
-            with devtabs[4]: st.dataframe(pd.DataFrame([{"Stage Latency":k,**(v if isinstance(v,dict) else {})} for k,v in phases.items()]),use_container_width=True,hide_index=True)
-            with devtabs[5]: st.json({"Runtime heartbeat":snapshot.get("heartbeat"),"Thread count":threading.active_count(),"Worker count":int(get_broker_quote_worker().thread is not None)})
-            with devtabs[6]: st.dataframe(pd.DataFrame(st.session_state.get("candidate_archive",[])),use_container_width=True,hide_index=True)
-            with devtabs[7]: st.json(st.session_state.get("errors",[]))
-            with devtabs[8]: show_startup_health_check()
-            raw=[_trade_row(t) for t in st.session_state.get("final_trade_list",[])]
-            if raw: st.dataframe(pd.DataFrame(raw)[["Symbol","AI Score","AI Threshold"]].rename(columns={"AI Score":"Raw score"}),use_container_width=True,hide_index=True)
-    if st.button("SAVE SETTINGS",type="primary"):
-        newrisk={**risk,"risk_per_trade":risk_per,"maximum_daily_loss":daily,"maximum_sector_exposure":sector}
-        WORKSPACE.save(display_name=name,time_zone=zone,execution_mode=execution,universe_source=universe,preferred_strategies=strategies,paper_trading_capital=capital,maximum_positions=max_pos,risk_preferences=newrisk,notifications={k:toggles[label] for k,label in [("trade_found","Trade found"),("order_executed","Order executed"),("stop_hit","Stop hit"),("target_hit","Target hit"),("daily_summary","Daily summary")]},display_preferences={"compact":compact,"density":density},chart_timeframe=chart_default,developer_mode=developer)
-        st.success("Settings saved."); st.rerun()
+        with st.form("risk_configuration"):
+            a,b=st.columns(2); capital=a.number_input("Paper capital",1.0,value=float(prefs.get("paper_trading_capital",1000000)),step=10000.0); per=b.number_input("Risk per trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1.0))); positions=a.number_input("Maximum open positions",1,100,int(prefs.get("maximum_positions",10))); daily=b.number_input("Daily loss limit (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3.0))); sector=a.number_input("Maximum sector exposure (%)",0.01,100.0,float(risk.get("maximum_sector_exposure",25.0))); rr=b.number_input("Minimum reward/risk",0.1,20.0,float(risk.get("minimum_reward_risk",2.0))); stop=a.selectbox("Stop-loss method",["ATR","Technical level","Percentage"]); sizing=b.selectbox("Position-sizing method",["Risk based","Fixed amount","Equal weight"]); holding=a.selectbox("Trade duration",["Intraday","Carry-forward"]); expiry=b.number_input("Signal expiry (minutes)",1,1440,int(prefs.get("signal_expiry_minutes",30)))
+            if st.form_submit_button("SAVE RISK",type="primary"):
+                WORKSPACE.save(paper_trading_capital=capital,maximum_positions=positions,signal_expiry_minutes=expiry,risk_preferences={**risk,"risk_per_trade":per,"maximum_daily_loss":daily,"maximum_sector_exposure":sector,"minimum_reward_risk":rr,"stop_loss_method":stop,"position_sizing_method":sizing,"trade_duration":holding}); st.success("Risk settings saved. The pipeline was not started or restarted.")
 
-def render_broker_manager():
-    """Compatibility route; canonical setup page owns all broker controls."""
-    render_setup_connect()
+
+def _business_reason(value):
+    raw=str(value or "").upper(); return {"AI_REJECTED":"Confidence too low","WAITING_VOLUME":"Waiting for volume confirmation","WAITING_VWAP":"Price is below VWAP","NOT_SUBMITTED":"No order submitted","WAITING_PRICE":"Waiting for entry price","STALE_DATA":"Market data is stale"}.get(raw,raw.replace("_"," ").capitalize() if raw else "No reason supplied")
+
+
+def render_trading_page():
+    st.header("TRADING"); tabs=st.tabs(["POSITIONS","HOLDINGS","TRADE SETUPS","REJECTED","ORDERS","CLOSED TRADES"])
+    pos=position_frame(); hold=holdings_frame(); orders=_orders_frame(); closed=_closed_trades_frame(); source=_normal_opportunity_frame(filtered_opportunities(WORKSPACE.preferences.get("filters",{})))
+    frames=[pos,hold,None,None,orders,closed]; messages=["No open positions.","No holdings.","","","No orders.","No closed trades."]
+    for index in [0,1,4,5]:
+        with tabs[index]: st.dataframe(frames[index],use_container_width=True,hide_index=True) if not frames[index].empty else _empty_state(messages[index])
+    with tabs[2]:
+        setup_tabs=st.tabs(["ACTIONABLE","WAITING FOR ENTRY","WATCHING","EXPIRED"])
+        statuses=["READY","WAITING FOR ENTRY","WATCHING","EXPIRED"]
+        for tab,status in zip(setup_tabs,statuses):
+            with tab:
+                frame=source[source["Status"]==status].copy(); frame["Last Updated"]=get_broker_state().snapshot().get("last_quote_time")
+                cols=["Symbol","Side","Strategy","Current Price","Entry","Stop","Target","Confidence","Status","Reason","Last Updated"]
+                st.dataframe(frame.reindex(columns=cols),use_container_width=True,hide_index=True) if not frame.empty else _empty_state(f"No {status.lower()} trade setups.")
+    with tabs[3]:
+        rejected=source[source["Status"]=="REJECTED"].copy()
+        if not rejected.empty: rejected["Reason"]=rejected["Reason"].map(_business_reason); st.dataframe(rejected,use_container_width=True,hide_index=True)
+        else: _empty_state("No rejected candidates.")
+
+
+def render_reports_page():
+    st.header("REPORTS"); tabs=st.tabs(["DAILY","WEEKLY","MONTHLY","P&L","STRATEGY PERFORMANCE","AI PERFORMANCE","RISK","CAPITAL ALLOCATION","TRADE JOURNAL","DOWNLOADS"])
+    trades=_closed_trades_frame(); setups=get_final_trade_dataframe(); positions=position_frame()
+    periods=[("D",tabs[0]),("W",tabs[1]),("ME",tabs[2])]
+    for period,tab in periods:
+        with tab:
+            frame=trades.copy()
+            if not frame.empty and "Date" in frame: frame["Date"]=pd.to_datetime(frame["Date"],errors="coerce"); frame=frame.set_index("Date").resample(period).agg({"P&L":"sum","Symbol":"count"}).rename(columns={"Symbol":"Trades"}).reset_index()
+            st.dataframe(frame,use_container_width=True,hide_index=True) if not frame.empty else _empty_state("No completed trades for this period.")
+    with tabs[3]: st.dataframe(trades,use_container_width=True,hide_index=True) if not trades.empty else _empty_state("No realized P&L yet.")
+    with tabs[4]: st.dataframe(setups.groupby("Strategy").size().rename("Setups").reset_index(),use_container_width=True,hide_index=True) if not setups.empty and "Strategy" in setups else _empty_state("No strategy performance data.")
+    with tabs[5]: _empty_state("AI performance appears after reviewed trade outcomes.")
+    with tabs[6]: st.dataframe(positions,use_container_width=True,hide_index=True) if not positions.empty else _empty_state("No active portfolio risk.")
+    with tabs[7]: st.dataframe(holdings_frame(),use_container_width=True,hide_index=True) if not holdings_frame().empty else _empty_state("No capital is currently allocated.")
+    with tabs[8]: st.dataframe(trades,use_container_width=True,hide_index=True) if not trades.empty else _empty_state("The trade journal is empty.")
+    with tabs[9]:
+        for name,frame in {"Trade Journal":trades,"Trade Setups":setups,"Positions":positions}.items(): st.download_button(f"DOWNLOAD {name.upper()} CSV",frame.to_csv(index=False).encode("utf-8-sig"),f"{name.lower().replace(' ','_')}.csv","text/csv",key=f"download_{name}")
+
 
 def dispatch_application():
-    """Route the six product workspaces and keep the ticker below navigation."""
+    """Route four product areas; the common ticker always precedes page content."""
     render_ticker_strip()
-    page=st.session_state.get("_page","Dashboard")
-    if page=="Setup": render_setup_connect()
-    elif page=="Dashboard": render_terminal_dashboard()
-    elif page=="Market": render_market_page()
-    elif page=="Portfolio": render_portfolio_page()
-    elif page=="Reports":
-        st.header("REPORTS")
-        reports={"Trade Report":get_final_trade_dataframe(),"P&L Report":_closed_trades_frame(),"Position Report":position_frame(),"Holdings Report":holdings_frame()}
-        for name,frame in reports.items():
-            st.download_button(f"Download {name} · CSV",frame.to_csv(index=False).encode("utf-8-sig"),file_name=f"{name.lower().replace(' ','_')}.csv",mime="text/csv;charset=utf-8",key=f"report_{name}")
-        if not any(not frame.empty for frame in reports.values()): _empty_state("No report data is available yet.")
-    elif page=="Settings": render_settings_page()
-
+    if st.session_state.get("_profile_open"): render_profile_dialog()
+    page=st.session_state.get("_page","Market")
+    {"Market":render_market_page,"Configuration":render_configuration_page,"Trading":render_trading_page,"Reports":render_reports_page}[page]()
 
 def main():
     restore_trading_state_once()
