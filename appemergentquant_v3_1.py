@@ -473,8 +473,49 @@ WORKSPACE = WorkspaceManager()
 
 @st.cache_resource(show_spinner=False)
 def get_news_manager():
-    """Return the sole process-wide news service; Streamlit reruns never fetch."""
-    return NewsManager(Path(_APP_DIR) / "data" / "news_cache.json")
+    """Return the process-wide news service without making it a startup gate.
+
+    The module is a shipped, required source file, but the service itself is an
+    optional product feature.  Cache corruption, an unwritable data directory,
+    or any other initialization failure therefore disables News rather than
+    preventing the trading application from loading.
+    """
+    try:
+        return NewsManager(Path(_APP_DIR) / "data" / "news_cache.json")
+    except Exception as exc:
+        logging.exception("News Intelligence initialization failed; News is disabled")
+        return DisabledNewsManager(exc)
+
+
+class DisabledNewsManager:
+    """Stable no-op interface used when the optional news service is unavailable."""
+
+    def __init__(self, error: Exception):
+        self.error = f"{type(error).__name__}: {error}"
+
+    def configure(self, **_changes: Any) -> None:
+        return None
+
+    def candidate_effect(self, _symbol: str) -> dict[str, Any]:
+        return {
+            "news_status": "DISABLED", "news_relevance": 0,
+            "news_sentiment": 0, "news_risk": 0, "news_summary": "",
+            "news_timestamp": None, "news_sources": [],
+            "news_effect_on_confidence": 0, "news_veto_reason": None,
+        }
+
+    def briefing(self, kind: str = "INTRADAY") -> str:
+        return f"{kind.upper()} BRIEF. News Intelligence is currently unavailable."
+
+    def claim_critical_alert(self, cooldown_minutes: int = 30) -> None:
+        return None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "articles": [], "clusters": [], "briefing_history": [],
+            "provider_status": "DISABLED", "last_error": self.error,
+            "stale": True,
+        }
 
 
 def configure_news_manager():
