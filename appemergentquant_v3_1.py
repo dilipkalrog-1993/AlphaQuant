@@ -38,7 +38,7 @@ import math
 import random
 import tempfile
 import threading
-import resource
+import platform
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
@@ -46,6 +46,16 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable
+
+try:
+    import psutil
+except ImportError:  # Optional: trading remains available without diagnostics.
+    psutil = None
+
+try:
+    import resource as _unix_resource
+except ImportError:  # Windows does not provide the Unix resource module.
+    _unix_resource = None
 
 # Make the `os_brains` package importable regardless of the process's
 # working directory. app.py uses absolute imports like
@@ -65,11 +75,40 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 import requests
+from news_intelligence import NewsManager
+from streamlit.components.v1 import html as component_html
 from io import StringIO
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 warnings.filterwarnings("ignore")
+
+
+def get_process_metrics() -> dict[str, Any]:
+    """Return process diagnostics without making platform support a startup gate."""
+    metrics = {"platform": platform.system(), "memory_mb": None,
+        "cpu_percent": None, "thread_count": None, "process_id": os.getpid(),
+        "available": False, "source": "fallback", "error": None}
+    if psutil is not None:
+        try:
+            process = psutil.Process(os.getpid())
+            metrics.update(memory_mb=round(process.memory_info().rss / (1024 ** 2), 1),
+                cpu_percent=float(process.cpu_percent(interval=None)),
+                thread_count=int(process.num_threads()), available=True, source="psutil")
+            return metrics
+        except Exception as exc:
+            metrics["error"] = f"{type(exc).__name__}: {exc}"
+    if _unix_resource is not None:
+        try:
+            maximum = _unix_resource.getrusage(_unix_resource.RUSAGE_SELF).ru_maxrss
+            # macOS reports bytes; Linux and other common Unix systems report KiB.
+            divisor = 1024 ** 2 if platform.system() == "Darwin" else 1024
+            metrics.update(memory_mb=round(maximum / divisor, 1),
+                thread_count=threading.active_count(), available=True, source="resource",
+                error=None)
+        except Exception as exc:
+            metrics["error"] = f"{type(exc).__name__}: {exc}"
+    return metrics
 
 
 class AlphaQuantCoreRuntime:
@@ -156,9 +195,10 @@ class AlphaQuantCoreRuntime:
             else:
                 item["last_successful_cycle"] = now
                 self.state["last_successful_cycle"] = now
-            memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-            self.state["memory_mb"] = round(memory_mb, 1)
-            self.state["memory_warning"] = memory_mb >= 1024
+            metrics = get_process_metrics()
+            self.state["process_metrics"] = metrics
+            self.state["memory_mb"] = metrics["memory_mb"]
+            self.state["memory_warning"] = bool(metrics["memory_mb"] and metrics["memory_mb"] >= 1024)
 
     def snapshot(self):
         with self.lock:
@@ -390,6 +430,12 @@ class WorkspaceManager:
         "minimum_fast_ai_score": 70,
         "require_deep_ai_before_entry": False,
         "signal_expiry_minutes": 30,
+        "news_settings": {"enabled": False, "provider": "RSS", "fetch_interval_minutes": 15,
+            "market_wide": True, "portfolio": True, "watchlist": True, "candidates": True,
+            "earnings": True, "regulatory": True, "corporate_actions": True,
+            "spoken_briefing": False, "auto_speak_critical": False, "voice": "",
+            "speech_rate": 1.0, "speech_pitch": 1.0, "speech_volume": 1.0,
+            "quiet_hours_start": "22:00", "quiet_hours_end": "07:00"},
         "report_filters": {},
     }
 
@@ -423,6 +469,19 @@ class WorkspaceManager:
 
 
 WORKSPACE = WorkspaceManager()
+
+
+@st.cache_resource(show_spinner=False)
+def get_news_manager():
+    """Return the sole process-wide news service; Streamlit reruns never fetch."""
+    return NewsManager(Path(_APP_DIR) / "data" / "news_cache.json")
+
+
+def configure_news_manager():
+    settings = dict(WORKSPACE.preferences.get("news_settings", {}))
+    # Credentials are memory/environment-only and never enter workspace persistence.
+    api_key = st.session_state.get("news_api_key") or os.environ.get("NEWSAPI_KEY", "")
+    get_news_manager().configure(**settings, api_key=api_key)
 _wp = WORKSPACE.preferences
 CONFIG.update({
     "DOWNLOAD_PERIOD": _wp["history_period"], "DOWNLOAD_INTERVAL": _wp["candle_interval"],
@@ -5422,6 +5481,15 @@ def build_ai_consensus():
                 logging.warning(f"AI_CONSENSUS strategist enrichment failed symbol={symbol}: {type(e).__name__}")
                 best.deep_ai_status = "ERROR"
 
+        # News can confirm or veto for risk review, but never creates a setup or
+        # bypasses the strategy, liquidity, entry, or Risk Manager gates.
+        news_effect = get_news_manager().candidate_effect(symbol)
+        for news_field, news_value in news_effect.items():
+            setattr(best, news_field, news_value)
+        if news_effect["news_effect_on_confidence"]:
+            best.add_reason(f"[News] {news_effect['news_status']}: relevance "
+                f"{news_effect['news_relevance']}, risk {news_effect['news_risk']}, "
+                f"confidence effect {news_effect['news_effect_on_confidence']:+d}")
         if best.fast_ai_status == "REJECTED":
             best.risk_verdict = {"candidate_symbol":symbol, "verdict":"NOT_EVALUATED",
                 "vetoed_by":["FAST_AI_GATE"], "reason":best.fast_ai_reason}
@@ -5444,6 +5512,11 @@ def build_ai_consensus():
             }
 
         best.risk_verdict = risk_verdict
+
+        if news_effect["news_veto_reason"]:
+            best.risk_verdict = {**risk_verdict, "verdict":"VETOED",
+                "reason":news_effect["news_veto_reason"], "news_veto":True}
+            risk_verdict = best.risk_verdict
 
         if risk_verdict["verdict"] == "VETOED":
             best.state = "VETOED"
@@ -12300,7 +12373,27 @@ def render_profile_contents():
         _,reminder=_broker_product_state()
         if reminder: st.warning(reminder)
         else: st.info("No broker token reminders.")
-        st.caption("Connection and trading notifications appear here.")
+        st.markdown("#### News intelligence")
+        news=dict(prefs.get("news_settings",{}))
+        with st.form("news_settings_form"):
+            enabled=st.toggle("Enable market news",value=bool(news.get("enabled",False)))
+            provider=st.selectbox("Provider",["RSS","NewsAPI"],index=1 if news.get("provider")=="NewsAPI" else 0)
+            api_key=st.text_input("News API key",type="password",value="",help="Stored only in process memory; NEWSAPI_KEY is preferred for restarts.")
+            interval=st.number_input("Fetch interval (minutes)",5,240,int(news.get("fetch_interval_minutes",15)))
+            a,b,c=st.columns(3)
+            market_wide=a.checkbox("Market-wide news",value=news.get("market_wide",True)); portfolio=b.checkbox("Portfolio news",value=news.get("portfolio",True)); watchlist=c.checkbox("Watchlist news",value=news.get("watchlist",True))
+            candidates=a.checkbox("Candidate news",value=news.get("candidates",True)); earnings=b.checkbox("Earnings announcements",value=news.get("earnings",True)); regulatory=c.checkbox("Regulatory announcements",value=news.get("regulatory",True)); corporate=a.checkbox("Corporate actions",value=news.get("corporate_actions",True))
+            spoken=b.checkbox("Spoken briefing enabled",value=news.get("spoken_briefing",False)); auto_speak=c.checkbox("Auto-speak critical alerts",value=news.get("auto_speak_critical",False),help="Off by default; browser permission may still require interaction.")
+            rate=st.slider("Speech rate",0.5,2.0,float(news.get("speech_rate",1.0)),0.1); pitch=st.slider("Speech pitch",0.5,2.0,float(news.get("speech_pitch",1.0)),0.1); volume=st.slider("Speech volume",0.0,1.0,float(news.get("speech_volume",1.0)),0.1)
+            quiet_start=st.text_input("Quiet hours start",news.get("quiet_hours_start","22:00")); quiet_end=st.text_input("Quiet hours end",news.get("quiet_hours_end","07:00"))
+            if st.form_submit_button("SAVE NEWS SETTINGS"):
+                saved={**news,"enabled":enabled,"provider":provider,"fetch_interval_minutes":interval,
+                    "market_wide":market_wide,"portfolio":portfolio,"watchlist":watchlist,"candidates":candidates,
+                    "earnings":earnings,"regulatory":regulatory,"corporate_actions":corporate,
+                    "spoken_briefing":spoken,"auto_speak_critical":auto_speak,"speech_rate":rate,
+                    "speech_pitch":pitch,"speech_volume":volume,"quiet_hours_start":quiet_start,"quiet_hours_end":quiet_end}
+                if api_key: st.session_state["news_api_key"]=api_key
+                WORKSPACE.save(news_settings=saved); get_news_manager().configure(**saved,api_key=st.session_state.get("news_api_key") or os.environ.get("NEWSAPI_KEY","")); st.success("News settings saved. Credentials were not persisted.")
     with display:
         with st.form("display_form"):
             compact=st.toggle("Compact mode",value=bool(prefs.get("display_preferences",{}).get("compact",True))); density=st.selectbox("Table density",["Compact","Comfortable"])
@@ -12339,6 +12432,62 @@ def _empty_state(message):
     st.markdown(f'<div class="aq-empty">{message}</div>',unsafe_allow_html=True)
 
 
+def render_speech_controls(text, key, autoplay=False):
+    """Render isolated browser speech controls; only plain metadata is serialized."""
+    settings=WORKSPACE.preferences.get("news_settings",{})
+    payload=json.dumps(str(text)[:4000]).replace("</", "<\\/")
+    rate=float(settings.get("speech_rate",1.0)); pitch=float(settings.get("speech_pitch",1.0)); volume=float(settings.get("speech_volume",1.0))
+    component_html(f"""<div style='display:flex;gap:6px;align-items:center'>
+      <button onclick='speak()'>Speak</button><button onclick='speechSynthesis.pause()'>Pause</button>
+      <button onclick='speechSynthesis.resume()'>Resume</button><button onclick='speechSynthesis.cancel()'>Stop</button>
+      <select id='voices'></select></div><script>
+      const text={payload}, voices=document.getElementById('voices');
+      function loadVoices(){{voices.innerHTML='';speechSynthesis.getVoices().forEach((v,i)=>{{let o=document.createElement('option');o.value=i;o.textContent=v.name+' ('+v.lang+')';voices.appendChild(o);}})}}
+      loadVoices();speechSynthesis.onvoiceschanged=loadVoices;
+      function speak(){{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text),vs=speechSynthesis.getVoices();u.voice=vs[Number(voices.value)]||null;u.rate={rate};u.pitch={pitch};u.volume={volume};u.lang='en-IN';speechSynthesis.speak(u);}}
+      {"setTimeout(speak, 250);" if autoplay else ""}
+      </script>""",height=45,key=f"speech_{key}")
+
+
+def render_news_page():
+    manager=get_news_manager(); state=manager.snapshot(); settings=WORKSPACE.preferences.get("news_settings",{})
+    top,refresh=st.columns([4,1]); top.markdown("### Market Brief")
+    if refresh.button("REFRESH NEWS",disabled=not settings.get("enabled",False),use_container_width=True): manager.request_refresh(); st.info("Refresh queued; trading workers continue independently.")
+    if not settings.get("enabled",False): st.info("Market news is disabled. Enable it under USER → NOTIFICATIONS.")
+    elif state.get("provider_status")=="DEGRADED": st.warning(f"News is temporarily unavailable. Last successful update: {state.get('last_successful_fetch') or 'never'}.")
+    brief=manager.briefing("INTRADAY"); st.write(brief)
+    if settings.get("spoken_briefing",False): render_speech_controls(brief,"market_brief")
+    if settings.get("auto_speak_critical",False):
+        try:
+            now=datetime.now().time(); start=datetime.strptime(settings.get("quiet_hours_start","22:00"),"%H:%M").time(); end=datetime.strptime(settings.get("quiet_hours_end","07:00"),"%H:%M").time()
+            quiet=(now >= start or now < end) if start > end else start <= now < end
+        except ValueError: quiet=True
+        alert=None if quiet else manager.claim_critical_alert()
+        if alert: render_speech_controls(alert,"critical_alert",autoplay=True)
+    articles=state.get("articles",[])
+    sections=[("Breaking / Critical",lambda a:a.get("urgency")=="CRITICAL"),
+        ("Portfolio News",lambda a:bool(set(a.get("related_symbols",[])) & set(st.session_state.get("paper_positions",{})))),
+        ("Candidate News",lambda a:bool(set(a.get("related_symbols",[])) & {getattr(x,"symbol","") for x in st.session_state.get("final_trade_list",[])})),
+        ("Watchlist News",lambda a:bool(set(a.get("related_symbols",[])) & set(st.session_state.get("watchlist",[])))),
+        ("Sector News",lambda a:bool(a.get("related_sectors"))), ("All News",lambda a:True)]
+    for title,predicate in sections:
+        matches=[a for a in articles if predicate(a)]
+        st.markdown(f"#### {title}")
+        if not matches: _empty_state(f"No {title.lower()} in the current cache."); continue
+        for index,item in enumerate(matches[:20]):
+            with st.container(border=True):
+                st.markdown(f"**{item.get('headline','')}**")
+                st.caption(f"{item.get('published_at','')} · {item.get('source','Unknown')} · {item.get('category','OTHER')} · {item.get('urgency','LOW')} · Sentiment: {item.get('sentiment','UNKNOWN')} (not a prediction)")
+                st.write(item.get("description") or "No provider snippet supplied.")
+                st.caption(f"Symbols: {', '.join(item.get('related_symbols',[])) or 'Market-wide / unassigned'} · Relevance {item.get('news_relevance_score',0)} · Risk {item.get('news_risk_score',0)}")
+                if item.get("score_reasons"): st.caption("Why: " + " · ".join(item["score_reasons"]))
+                st.link_button("OPEN SOURCE",item.get("url","#")); render_speech_controls(f"{item.get('headline','')}. {item.get('description','')}",f"{title}_{index}")
+        if title != "All News": st.divider()
+    if WORKSPACE.preferences.get("developer_mode",False):
+        with st.expander("Developer · news diagnostics"):
+            safe={k:v for k,v in state.items() if k not in {"articles","clusters","briefing_history","alerted_ids"}}; st.json(safe)
+
+
 def render_market_page():
     state_label,reminder=_broker_product_state(); running=bool(st.session_state.get("autonomous_active")); candidates=filtered_opportunities(WORKSPACE.preferences.get("filters",{})); normal=_normal_opportunity_frame(candidates)
     st.header("MARKET")
@@ -12348,7 +12497,7 @@ def render_market_page():
     run,stop=st.columns(2)
     if run.button("RUN ALPHAQUANT",type="primary",disabled=running,use_container_width=True,key="market_run"): st.session_state["alphaquant_run_pending"]=True; st.rerun()
     if stop.button("STOP ALPHAQUANT",disabled=not running,use_container_width=True,key="market_stop"): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); get_core_runtime().stop(); st.rerun()
-    overview,watch,search,chart,opportunities=st.tabs(["OVERVIEW","WATCHLISTS","SYMBOL SEARCH","CHARTS","OPPORTUNITIES"])
+    overview,watch,news,search,chart,opportunities=st.tabs(["OVERVIEW","WATCHLISTS","NEWS","SYMBOL SEARCH","CHARTS","OPPORTUNITIES"])
     with overview:
         active=list(st.session_state.get("scan_universe",[])) or None
         regime=market_regime_snapshot(active); breadth=regime["breadth"]
@@ -12358,6 +12507,7 @@ def render_market_page():
         sectors=sector_snapshot(active); st.markdown("#### Sector overview")
         st.dataframe(sectors,use_container_width=True,hide_index=True) if not sectors.empty else _empty_state(f"Sector overview unavailable — only {breadth['valid']} of {breadth['total']} symbols have valid previous-close data.")
     with watch: render_watchlist(True)
+    with news: render_news_page()
     with search:
         symbol=st.text_input("Symbol search",placeholder="RELIANCE",key="market_symbol_search").strip().upper().replace(".NS","")
         if symbol and st.button("VIEW CHART",type="primary",key="market_symbol_open"): st.session_state.selected_symbol=symbol; st.rerun()
@@ -12644,6 +12794,7 @@ def dispatch_application():
 
 def main():
     restore_trading_state_once()
+    configure_news_manager()
     core = get_core_runtime()
     core_snapshot = core.snapshot()
     if core_snapshot.get("status") in {"RUNNING", "MONITORING", "RESTORED"}:
