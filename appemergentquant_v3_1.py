@@ -38,6 +38,7 @@ import math
 import random
 import tempfile
 import threading
+import resource
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
@@ -96,7 +97,9 @@ class AlphaQuantCoreRuntime:
     def _load(self):
         default = {"version": self.VERSION, "status": "STOPPED", "run_id": None,
                    "heartbeat": None, "started_at": None, "pipeline": {},
-                   "positions": {}, "orders": {}, "candidates": []}
+                   "positions": {}, "orders": {}, "candidates": [], "workers": {},
+                   "queue_depths": {}, "restart_count": 0, "last_successful_cycle": None,
+                   "last_error": None, "memory_warning": False}
         try:
             saved = json.loads(self.storage_path.read_text(encoding="utf-8"))
             if isinstance(saved, dict):
@@ -138,6 +141,24 @@ class AlphaQuantCoreRuntime:
                 self.state["status"] = "MONITORING"
             self._persist()
         self.wake.set()
+
+    def heartbeat(self, worker: str, *, queue_depth: int = 0, error: Exception | None = None):
+        """Record bounded worker health without allowing worker exceptions into the UI."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            workers = self.state.setdefault("workers", {})
+            item = workers.setdefault(worker, {"restart_count": 0})
+            item.update(heartbeat=now, status="ERROR" if error else "HEALTHY")
+            self.state.setdefault("queue_depths", {})[worker] = max(0, int(queue_depth))
+            if error:
+                item["last_error"] = f"{type(error).__name__}: {error}"
+                self.state["last_error"] = {"worker": worker, "error": item["last_error"], "time": now}
+            else:
+                item["last_successful_cycle"] = now
+                self.state["last_successful_cycle"] = now
+            memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            self.state["memory_mb"] = round(memory_mb, 1)
+            self.state["memory_warning"] = memory_mb >= 1024
 
     def snapshot(self):
         with self.lock:
@@ -11832,7 +11853,9 @@ def render_profile():
     st.markdown('<div class="aq-panel-title">Capital and Execution Settings</div>',unsafe_allow_html=True)
     risk=dict(prefs.get("risk_preferences",{})); c1,c2=st.columns(2)
     execution=c1.radio("Execution Mode",["PAPER","LIVE"],index=0 if prefs.get("execution_mode","PAPER")=="PAPER" else 1,horizontal=True,key="profile_execution_mode")
-    capital=c2.number_input("Paper Trading Starting Capital (₹) · simulated",min_value=1.0,value=float(prefs["paper_trading_capital"]),step=10000.0,key="profile_paper_starting_capital")
+    paper_mode = execution == "PAPER"
+    capital=(c2.number_input("Paper Trading Starting Capital (₹) · simulated",min_value=1.0,value=float(prefs["paper_trading_capital"]),step=10000.0,key="profile_paper_starting_capital")
+        if paper_mode else float(prefs["paper_trading_capital"]))
     risk_per=c1.number_input("Risk Per Trade (%)",0.01,100.0,float(risk.get("risk_per_trade",1.0)),key="profile_risk_per_trade")
     daily=c2.number_input("Maximum Daily Loss (%)",0.01,100.0,float(risk.get("maximum_daily_loss",3.0)),key="profile_maximum_daily_loss")
     maxpos=c1.number_input("Maximum Open Positions",1,100,int(prefs.get("maximum_positions",10)),key="profile_maximum_open_positions")
@@ -11848,9 +11871,9 @@ def render_profile():
         WORKSPACE.save(execution_mode=execution,maximum_positions=maxpos,risk_preferences=newrisk,paper_trading_capital=float(prefs["paper_trading_capital"]) if changed and has_trades else capital,paper_capital_pending=capital if changed and has_trades else None)
         if not has_trades: st.session_state.paper_capital=capital; st.session_state.paper_broker.update(cash=capital,starting_capital=capital)
         st.success("Settings saved." if not (changed and has_trades) else "Capital scheduled for the next paper-account reset.")
-    st.markdown("#### Reset Paper Account")
-    confirm=st.checkbox("I understand that open simulated positions will be closed and the current ledger archived.",key="confirm_paper_reset")
-    if st.button("Reset Paper Account",disabled=not confirm,key="profile_reset_paper_account"):
+    if paper_mode: st.markdown("#### Reset Paper Account")
+    confirm=st.checkbox("I understand that open simulated positions will be closed and the current ledger archived.",key="confirm_paper_reset") if paper_mode else False
+    if paper_mode and st.button("Reset Paper Account",disabled=not confirm,key="profile_reset_paper_account"):
         archive=Path(_APP_DIR)/"data"/"paper_archives"; archive.mkdir(parents=True,exist_ok=True)
         snapshot={"archived_at":datetime.now().isoformat(),"ledger":st.session_state.get("paper_broker",{}),"history":[getattr(x,"__dict__",str(x)) for x in st.session_state.get("paper_history",[])],"positions":{k:getattr(v,"__dict__",str(v)) for k,v in st.session_state.get("paper_positions",{}).items()}}
         (archive/f"paper_account_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json").write_text(json.dumps(snapshot,default=str,indent=2))
@@ -11919,13 +11942,104 @@ class AuthoritativeBrokerState:
         with self.lock:
             for symbol, quote in quotes.items():
                 received = quote.get("received_at") or now
-                self.quotes[symbol] = {**quote, "symbol":symbol, "received_at":received,
-                    "source":source, "is_stale":False}
+                previous = quote.get("previous_close")
+                ltp = quote.get("ltp")
+                valid_previous = previous is not None and float(previous) > 0
+                change = float(ltp) - float(previous) if ltp is not None and valid_previous else None
+                age = max(0.0, (now - _as_utc_datetime(received)).total_seconds())
+                stale = age > 30
+                self.quotes[symbol] = {
+                    "instrument_key": quote.get("instrument_key", ""), "symbol": symbol,
+                    "exchange": quote.get("exchange", "NSE"), "ltp": float(ltp) if ltp is not None else None,
+                    "previous_close": float(previous) if valid_previous else None,
+                    "previous_close_source": quote.get("previous_close_source", "BROKER_OHLC" if valid_previous else "UNAVAILABLE"),
+                    "open": quote.get("open"), "high": quote.get("high"), "low": quote.get("low"),
+                    "volume": quote.get("volume"), "change": change,
+                    "change_percent": change / float(previous) * 100 if change is not None else None,
+                    "broker_timestamp": quote.get("broker_timestamp", quote.get("timestamp")),
+                    "received_at": received, "source": source,
+                    "freshness_status": "STALE" if stale else "FRESH", "is_stale": stale,
+                }
             if quotes:
                 self.values.update(data_source=source, last_quote_time=now, last_sync_time=now,
                     market_data_connected=source in {"BROKER_LIVE", "BROKER_SNAPSHOT"})
                 if source == "BROKER_LIVE": self.values["health_status"] = "LIVE_DATA_CONNECTED"
                 elif self.values.get("authenticated"): self.values["health_status"] = "READY_FOR_PAPER" if self.values["execution_mode"] == "PAPER" else "CONNECTED"
+
+
+def _as_utc_datetime(value):
+    """Coerce broker timestamps safely; malformed timestamps are stale, not fatal."""
+    try:
+        parsed = pd.to_datetime(value, utc=True)
+        return parsed.to_pydatetime()
+    except (TypeError, ValueError, OverflowError):
+        return datetime.fromtimestamp(0, timezone.utc)
+
+
+def market_breadth(active_symbols=None, tolerance=1e-8):
+    """Calculate breadth solely from the authoritative normalized snapshot."""
+    quotes = get_broker_state().snapshot().get("quotes", {})
+    symbols = list(active_symbols or quotes)
+    counts = {"advancing": 0, "declining": 0, "unchanged": 0, "unavailable": 0}
+    for symbol in symbols:
+        quote = quotes.get(symbol, {})
+        ltp, previous = quote.get("ltp"), quote.get("previous_close")
+        if quote.get("is_stale") or ltp is None or previous is None:
+            counts["unavailable"] += 1
+        elif abs(float(ltp) - float(previous)) <= tolerance * max(1.0, abs(float(previous))):
+            counts["unchanged"] += 1
+        elif float(ltp) > float(previous):
+            counts["advancing"] += 1
+        else:
+            counts["declining"] += 1
+    valid = counts["advancing"] + counts["declining"] + counts["unchanged"]
+    ratio = counts["advancing"] / max(1, counts["declining"])
+    counts.update(total=len(symbols), valid=valid, advance_decline_ratio=ratio,
+        classification="INSUFFICIENT DATA" if not valid else
+        ("STRONG BREADTH" if ratio >= 1.5 else "WEAK BREADTH" if ratio <= 0.67 else "BALANCED"))
+    return counts
+
+
+def market_regime_snapshot(active_symbols=None):
+    breadth = market_breadth(active_symbols)
+    quotes = get_broker_state().snapshot().get("quotes", {})
+    missing = []
+    if not breadth["valid"]: missing.append("valid previous-close quotes")
+    index_changes = [quotes.get(name, {}).get("change_percent") for name in ("NIFTY 50", "BANK NIFTY")]
+    index_changes = [float(value) for value in index_changes if value is not None]
+    if not index_changes: missing.append("NIFTY/BANK NIFTY movement")
+    if missing: return {"state": "INSUFFICIENT DATA", "missing_inputs": missing, "breadth": breadth}
+    mean_index = sum(index_changes) / len(index_changes)
+    if abs(mean_index) >= 1.5: state = "VOLATILE"
+    elif mean_index > .15 and breadth["advance_decline_ratio"] >= 1: state = "BULLISH"
+    elif mean_index < -.15 and breadth["advance_decline_ratio"] <= 1: state = "BEARISH"
+    elif breadth["classification"] in {"STRONG BREADTH", "WEAK BREADTH"}: state = breadth["classification"]
+    else: state = "RANGE-BOUND"
+    return {"state": state, "missing_inputs": [], "breadth": breadth, "index_change": mean_index}
+
+
+def sector_snapshot(active_symbols=None):
+    quotes = get_broker_state().snapshot().get("quotes", {})
+    rows = []
+    for symbol in list(active_symbols or quotes):
+        quote = quotes.get(symbol, {})
+        change = quote.get("change_percent")
+        if change is None or quote.get("is_stale"): continue
+        rows.append({"Symbol": symbol, "Sector": STOCK_SECTOR_MAP.get(symbol, "Other"),
+            "Change %": float(change), "Volume": quote.get("volume")})
+    if not rows: return pd.DataFrame(columns=["Sector", "Advancing", "Declining", "Average Change %", "Median Change %", "Valid Symbols", "Strongest", "Weakest", "State"])
+    frame = pd.DataFrame(rows)
+    output = []
+    for sector, group in frame.groupby("Sector", sort=True):
+        strongest = group.loc[group["Change %"].idxmax(), "Symbol"]
+        weakest = group.loc[group["Change %"].idxmin(), "Symbol"]
+        average = group["Change %"].mean()
+        output.append({"Sector": sector, "Advancing": int((group["Change %"] > 0).sum()),
+            "Declining": int((group["Change %"] < 0).sum()), "Average Change %": average,
+            "Median Change %": group["Change %"].median(), "Valid Symbols": len(group),
+            "Strongest": strongest, "Weakest": weakest,
+            "State": "STRONG" if average > .25 else "WEAK" if average < -.25 else "MIXED"})
+    return pd.DataFrame(output)
 
 
 @st.cache_resource(show_spinner=False)
@@ -11949,7 +12063,6 @@ class BrokerQuoteWorker:
 
     def stop(self):
         self.stop_event.set()
-        with self.lock: self.thread = None
 
     def _run(self):
         while not self.stop_event.wait(3.0):
@@ -11969,18 +12082,18 @@ class BrokerQuoteWorker:
                     ltp = raw.get("last_price") or raw.get("ltp")
                     previous = ohlc.get("close") or raw.get("previous_close")
                     if ltp is None: continue
-                    change = float(ltp) - float(previous or ltp)
                     normalized[symbol] = {"instrument_key":key, "ltp":float(ltp),
                         "open":ohlc.get("open"), "high":ohlc.get("high"), "low":ohlc.get("low"),
-                        "previous_close":previous, "change":change,
-                        "change_percent":change / float(previous) * 100 if previous else 0.0,
+                        "previous_close":previous, "previous_close_source":"BROKER_OHLC" if previous else "UNAVAILABLE",
                         "volume":raw.get("volume"), "timestamp":raw.get("last_trade_time") or datetime.now(timezone.utc),
                         "received_at":datetime.now(timezone.utc)}
                 self.state.publish_quotes(normalized, "BROKER_SNAPSHOT")
-            except Exception:
+                get_core_runtime().heartbeat("market-data")
+            except Exception as exc:
                 # Never leak response bodies or credential-bearing SDK objects.
                 self.state.update(market_data_connected=False, data_source="YFINANCE_INTRADAY_FALLBACK",
                     health_status="DEGRADED", connection_error="Broker quote polling failed; delayed fallback remains available.")
+                get_core_runtime().heartbeat("market-data", error=exc)
 
 
 @st.cache_resource(show_spinner=False)
@@ -12202,6 +12315,14 @@ def render_profile_contents():
             with devtabs[2]: st.json({"threads":threading.active_count(),"pipeline":st.session_state.get("pipeline_state")})
             with devtabs[3]: st.json(st.session_state.get("errors",[]))
             with devtabs[4]: show_startup_health_check()
+            with devtabs[4]:
+                st.markdown("#### Paper Execution Self-Test")
+                st.caption("Validation-only records use the paper adapter and are excluded from normal reports.")
+                a,b=st.columns(2)
+                if a.button("RUN PAPER EXECUTION SELF-TEST",type="primary",key="run_paper_execution_self_test"):
+                    _paper_validation_lifecycle(int(WORKSPACE.preferences.get("paper_validation_quantity",1)))
+                if b.button("CLEAN UP VALIDATION RECORDS",key="cleanup_paper_execution_self_test"):
+                    _cleanup_paper_validation(); st.success("Validation-only records removed.")
 
 
 if hasattr(st,"dialog"):
@@ -12229,10 +12350,13 @@ def render_market_page():
     if stop.button("STOP ALPHAQUANT",disabled=not running,use_container_width=True,key="market_stop"): st.session_state.update(autonomous_active=False,stop_requested=True,pipeline_state="STOPPED"); get_core_runtime().stop(); st.rerun()
     overview,watch,search,chart,opportunities=st.tabs(["OVERVIEW","WATCHLISTS","SYMBOL SEARCH","CHARTS","OPPORTUNITIES"])
     with overview:
-        regime=st.session_state.get("market_regime","Awaiting analysis"); universe=list(st.session_state.get("stock_objects",{}).values()); advances=sum(float(getattr(x,"change_pct",0) or 0)>0 for x in universe); declines=sum(float(getattr(x,"change_pct",0) or 0)<0 for x in universe)
-        x,y,z=st.columns(3); x.metric("Market regime",str(regime).replace("_"," ").title()); y.metric("Breadth",f"{advances} advancing / {declines} declining"); z.metric("Universe",len(universe))
-        sectors=calculate_sector_strength() or {}; st.markdown("#### Sector overview")
-        st.dataframe(pd.DataFrame([{"Sector":k,"Strength":v} for k,v in sectors.items()]),use_container_width=True,hide_index=True) if sectors else _empty_state("Sector overview will appear after analysis.")
+        active=list(st.session_state.get("scan_universe",[])) or None
+        regime=market_regime_snapshot(active); breadth=regime["breadth"]
+        x,y,z=st.columns(3); x.metric("Market regime",regime["state"].replace("_"," ").title()); y.metric("Breadth",f"{breadth['advancing']} advancing / {breadth['declining']} declining"); z.metric("Valid quotes",f"{breadth['valid']} / {breadth['total']}")
+        st.caption(f"Unchanged {breadth['unchanged']} · Unavailable {breadth['unavailable']} · A/D {breadth['advance_decline_ratio']:.2f} · {breadth['classification']}")
+        if regime["missing_inputs"]: st.info("Regime unavailable — missing " + ", ".join(regime["missing_inputs"]) + ".")
+        sectors=sector_snapshot(active); st.markdown("#### Sector overview")
+        st.dataframe(sectors,use_container_width=True,hide_index=True) if not sectors.empty else _empty_state(f"Sector overview unavailable — only {breadth['valid']} of {breadth['total']} symbols have valid previous-close data.")
     with watch: render_watchlist(True)
     with search:
         symbol=st.text_input("Symbol search",placeholder="RELIANCE",key="market_symbol_search").strip().upper().replace(".NS","")
@@ -12281,10 +12405,12 @@ def _developer_internal_error(component, exc):
 
 
 def _orders_frame():
-    """Return the persistent PaperBroker order ledger in a stable UI schema."""
+    """Return only the active execution namespace in a stable UI schema."""
     rows = []
     try:
-        orders = st.session_state.get("paper_broker", {}).get("orders", {}) or {}
+        mode = WORKSPACE.preferences.get("execution_mode", "PAPER")
+        orders = (st.session_state.get("paper_broker", {}).get("orders", {}) if mode == "PAPER"
+            else st.session_state.get("live_orders", {})) or {}
         records = orders.values() if isinstance(orders, dict) else orders
         for raw in records:
             if not isinstance(raw, dict):
@@ -12304,10 +12430,12 @@ def _closed_trades_frame(include_validation=False):
     """Return restored PaperPosition history; validation is opt-in for reports."""
     rows = []
     try:
-        for trade in st.session_state.get("paper_history", []) or []:
+        mode = WORKSPACE.preferences.get("execution_mode", "PAPER")
+        history = st.session_state.get("paper_history", []) if mode == "PAPER" else st.session_state.get("live_closed_trades", [])
+        for trade in history or []:
             get = lambda name, default=None: trade.get(name, default) if isinstance(trade, dict) else getattr(trade, name, default)
             source = str(get("source", "PAPER") or "PAPER")
-            if source == "PAPER_VALIDATION" and not include_validation:
+            if source in {"PAPER_VALIDATION", "VALIDATION_TEST"} and not include_validation:
                 continue
             entry, exit_price = float(get("entry", 0) or 0), float(get("current_price", get("exit_price", 0)) or 0)
             qty, pnl = int(get("qty", get("quantity", 0)) or 0), float(get("realized_pnl", get("pnl", 0)) or 0)
@@ -12333,7 +12461,7 @@ def _paper_validation_lifecycle(quantity=1):
         stages.append({"Stage": name, "Result": "PASS" if passed else "FAIL", "Detail": detail})
         if not passed: raise RuntimeError(f"{name}: {detail}")
     run_id = "paper-validation-" + uuid.uuid4().hex[:10]
-    symbol, strategy, side = "AQVALID", "PAPER LIFECYCLE", "BUY"
+    symbol, strategy, side = "AQVALID", "PAPER EXECUTION SELF-TEST", "BUY"
     signal_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     key = hashlib.sha256(f"{run_id}|{symbol}|{strategy}|{signal_time}|{side}".encode()).hexdigest()
     try:
@@ -12350,12 +12478,12 @@ def _paper_validation_lifecycle(quantity=1):
         order_id = "PV-" + key[:12]
         order = {"order_id":order_id,"idempotency_key":key,"symbol":symbol,"side":side,"qty":int(quantity),
             "price":entry,"execution_price":entry,"order_type":"MARKET","status":"COMPLETE",
-            "strategy":strategy,"source":"PAPER_VALIDATION","timestamp":datetime.now(timezone.utc),
+            "strategy":strategy,"source":"VALIDATION_TEST","timestamp":datetime.now(timezone.utc),
             "completed_at":datetime.now(timezone.utc)}
         ledger["orders"][order_id] = order; ledger["trade_history"].append(dict(order))
         stage("Simulated order", order_id in ledger["orders"]); stage("Simulated fill", order["status"] == "COMPLETE")
         position = PaperPosition(symbol=symbol, strategy=strategy, qty=int(quantity), entry=entry,
-            stop=stop, target1=target, confidence=100, ai_score=100, source="PAPER_VALIDATION", idempotency_key=key)
+            stop=stop, target1=target, confidence=100, ai_score=100, source="VALIDATION_TEST", idempotency_key=key)
         position.initialise(); st.session_state.setdefault("paper_positions", {})[symbol] = position
         ledger["cash"] = float(ledger.get("cash", 0)) - entry * quantity
         stage("Open position", st.session_state.paper_positions.get(symbol) is position)
@@ -12380,10 +12508,11 @@ def _paper_validation_lifecycle(quantity=1):
 
 def _cleanup_paper_validation():
     ledger = st.session_state.get("paper_broker", {})
-    ledger["orders"] = {k:v for k,v in (ledger.get("orders", {}) or {}).items() if v.get("source") != "PAPER_VALIDATION"}
-    ledger["trade_history"] = [v for v in ledger.get("trade_history", []) if v.get("source") != "PAPER_VALIDATION"]
-    st.session_state["paper_history"] = [v for v in st.session_state.get("paper_history", []) if getattr(v,"source",None) != "PAPER_VALIDATION"]
-    st.session_state["paper_positions"] = {k:v for k,v in st.session_state.get("paper_positions",{}).items() if getattr(v,"source",None) != "PAPER_VALIDATION"}
+    validation_sources = {"PAPER_VALIDATION", "VALIDATION_TEST"}
+    ledger["orders"] = {k:v for k,v in (ledger.get("orders", {}) or {}).items() if v.get("source") not in validation_sources}
+    ledger["trade_history"] = [v for v in ledger.get("trade_history", []) if v.get("source") not in validation_sources]
+    st.session_state["paper_history"] = [v for v in st.session_state.get("paper_history", []) if getattr(v,"source",None) not in validation_sources]
+    st.session_state["paper_positions"] = {k:v for k,v in st.session_state.get("paper_positions",{}).items() if getattr(v,"source",None) not in validation_sources}
     st.session_state.pop("paper_validation_result", None); persist_trading_state()
 
 
@@ -12469,11 +12598,6 @@ def render_trading_page():
             if rejected: st.dataframe(pd.DataFrame(rejected.values()),hide_index=True,use_container_width=True)
             timings=st.session_state.get("pipeline_timings",{})
             if timings: st.dataframe(pd.DataFrame([{"Stage":k,"Seconds":v} for k,v in timings.items()]),hide_index=True,use_container_width=True)
-            a,b=st.columns(2)
-            if a.button("RUN PAPER LIFECYCLE TEST",type="primary",key="run_paper_lifecycle"):
-                _paper_validation_lifecycle(int(WORKSPACE.preferences.get("paper_validation_quantity",1)))
-            if b.button("CLEAN UP VALIDATION RECORDS",key="cleanup_paper_validation"):
-                _cleanup_paper_validation(); st.success("Validation-only records removed.")
             result=st.session_state.get("paper_validation_result")
             if result:
                 (st.success if result["passed"] else st.error)("Paper lifecycle PASS" if result["passed"] else "Paper lifecycle FAIL")
@@ -12504,7 +12628,19 @@ def dispatch_application():
     render_ticker_strip()
     if st.session_state.get("_profile_open"): render_profile_dialog()
     page=st.session_state.get("_page","Market")
-    {"Market":render_market_page,"Configuration":render_configuration_page,"Trading":render_trading_page,"Reports":render_reports_page}[page]()
+    renderer={"Market":render_market_page,"Configuration":render_configuration_page,"Trading":render_trading_page,"Reports":render_reports_page}.get(page, render_market_page)
+    try:
+        renderer()
+        get_core_runtime().heartbeat("streamlit-ui")
+    except Exception as exc:
+        run_id=get_core_runtime().snapshot().get("run_id") or st.session_state.get("pipeline_run_id") or "UI"
+        incident={"exception_type":type(exc).__name__,"traceback":traceback.format_exc(),
+            "component":page,"timestamp":datetime.now(timezone.utc).isoformat(),"run_id":run_id}
+        st.session_state.setdefault("component_errors",[]).append(incident)
+        get_core_runtime().heartbeat("streamlit-ui", error=exc)
+        logging.exception("Product page failed: %s", page)
+        st.error("This section could not load. AlphaQuant is still running.")
+        if WORKSPACE.preferences.get("developer_mode",False): st.json(incident)
 
 def main():
     restore_trading_state_once()
